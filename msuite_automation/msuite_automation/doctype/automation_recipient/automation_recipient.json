@@ -1,0 +1,12 @@
+{
+ "actions": [], "creation": "2026-09-25 12:00:00.000000", "doctype": "DocType", "editable_grid": 1, "engine": "InnoDB",
+ "field_order": ["reference_doctype", "phone_field", "email_field"],
+ "fields": [
+  {"fieldname": "reference_doctype", "fieldtype": "Link", "label": "DocType", "options": "DocType", "reqd": 1, "in_list_view": 1},
+  {"fieldname": "phone_field", "fieldtype": "Data", "label": "Phone Field", "in_list_view": 1, "description": "Blank = auto-detect"},
+  {"fieldname": "email_field", "fieldtype": "Data", "label": "Email Field", "in_list_view": 1, "description": "Blank = auto-detect"}
+ ],
+ "istable": 1, "links": [], "modified": "2026-09-25 12:00:00.000000", "modified_by": "Administrator",
+ "module": "MSuite Automation", "name": "Automation Recipient", "owner": "Administrator", "permissions": [],
+ "sort_field": "modified", "sort_order": "DESC", "states": []
+}

@@ -1,0 +1,29 @@
+{
+ "actions": [], "creation": "2026-09-24 12:00:00.000000", "doctype": "DocType", "editable_grid": 1, "engine": "InnoDB",
+ "field_order": ["trigger_id", "label", "trigger_type", "reference_doctype", "doc_event", "field", "from_value", "to_value",
+  "date_field", "offset_days", "offset_direction", "schedule_frequency", "filter_logic", "condition", "pos_x", "pos_y"],
+ "fields": [
+  {"fieldname": "trigger_id", "fieldtype": "Data", "label": "Trigger ID", "reqd": 1, "read_only": 1},
+  {"fieldname": "label", "fieldtype": "Data", "label": "Label", "in_list_view": 1},
+  {"fieldname": "trigger_type", "fieldtype": "Select", "label": "Trigger Type", "in_list_view": 1, "default": "Field Change",
+   "options": "Document Event\nField Change\nDate Based\nSchedule"},
+  {"fieldname": "reference_doctype", "fieldtype": "Link", "label": "DocType", "options": "DocType", "in_list_view": 1},
+  {"fieldname": "doc_event", "fieldtype": "Select", "label": "Event",
+   "options": "\nBefore Insert\nAfter Insert\nBefore Validate\nBefore Save\nAfter Save\nBefore Submit\nAfter Submit\nBefore Cancel\nAfter Cancel\nOn Trash\nAfter Delete\nBefore Save (Submitted Document)\nAfter Save (Submitted Document)"},
+  {"fieldname": "field", "fieldtype": "Data", "label": "Watched Field", "in_list_view": 1},
+  {"fieldname": "from_value", "fieldtype": "Data", "label": "From", "description": "Blank = any previous value"},
+  {"fieldname": "to_value", "fieldtype": "Data", "label": "To", "description": "Blank = changed to any non-empty value"},
+  {"fieldname": "date_field", "fieldtype": "Data", "label": "Date Field"},
+  {"fieldname": "offset_days", "fieldtype": "Int", "label": "Days"},
+  {"fieldname": "offset_direction", "fieldtype": "Select", "label": "Direction", "options": "Before\nAfter", "default": "Before"},
+  {"fieldname": "schedule_frequency", "fieldtype": "Select", "label": "Frequency",
+   "options": "\nAll\nHourly\nDaily\nWeekly\nMonthly\nYearly\nHourly Long\nDaily Long\nWeekly Long\nMonthly Long"},
+  {"fieldname": "filter_logic", "fieldtype": "Select", "label": "Match", "options": "All\nAny", "default": "All"},
+  {"fieldname": "condition", "fieldtype": "Code", "label": "Condition", "options": "Python Expression", "permlevel": 1},
+  {"fieldname": "pos_x", "fieldtype": "Float", "label": "X"},
+  {"fieldname": "pos_y", "fieldtype": "Float", "label": "Y"}
+ ],
+ "istable": 1, "links": [], "modified": "2026-09-24 12:00:00.000000", "modified_by": "Administrator",
+ "module": "MSuite Automation", "name": "Automation Trigger", "owner": "Administrator", "permissions": [],
+ "sort_field": "modified", "sort_order": "DESC", "states": []
+}

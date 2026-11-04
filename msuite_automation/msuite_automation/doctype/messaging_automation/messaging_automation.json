@@ -1,0 +1,362 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:MA-{YYYY}-{#####}",
+ "creation": "2022-10-27 22:04:58.515829",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "overview_tab",
+  "title",
+  "disabled",
+  "description",
+  "when_tab",
+  "trigger_type",
+  "reference_doctype",
+  "doc_event",
+  "date_field",
+  "offset_days",
+  "offset_direction",
+  "schedule_frequency",
+  "triggers",
+  "filters_tab",
+  "filter_logic",
+  "filters",
+  "advanced_section",
+  "condition",
+  "who_tab",
+  "phone_field",
+  "email_field",
+  "do_tab",
+  "steps",
+  "variable_mappings",
+  "edges",
+  "recipients",
+  "notes",
+  "settings_tab",
+  "whatsapp_account",
+  "sms_account",
+  "send_frequency",
+  "skip_return_documents"
+ ],
+ "fields": [
+  {
+   "fieldname": "overview_tab",
+   "fieldtype": "Tab Break",
+   "label": "Overview"
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "disabled",
+   "fieldtype": "Check",
+   "label": "Disabled",
+   "default": "1",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "when_tab",
+   "fieldtype": "Tab Break",
+   "label": "When"
+  },
+  {
+   "fieldname": "trigger_type",
+   "fieldtype": "Select",
+   "label": "Trigger",
+   "in_standard_filter": 1,
+   "options": "Document Event\nField Change\nDate Based\nSchedule",
+   "default": "Document Event",
+   "hidden": 1
+  },
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Link",
+   "label": "DocType",
+   "options": "DocType",
+   "in_standard_filter": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "doc_event",
+   "fieldtype": "Select",
+   "label": "Event",
+   "depends_on": "eval:['Document Event'].includes(doc.trigger_type)",
+   "options": "\nBefore Insert\nAfter Insert\nBefore Validate\nBefore Save\nAfter Save\nBefore Submit\nAfter Submit\nBefore Cancel\nAfter Cancel\nOn Trash\nAfter Delete\nBefore Save (Submitted Document)\nAfter Save (Submitted Document)",
+   "hidden": 1
+  },
+  {
+   "fieldname": "date_field",
+   "fieldtype": "Data",
+   "label": "Date Field",
+   "depends_on": "eval:['Date Based'].includes(doc.trigger_type)",
+   "hidden": 1
+  },
+  {
+   "fieldname": "offset_days",
+   "fieldtype": "Int",
+   "label": "Days",
+   "depends_on": "eval:['Date Based'].includes(doc.trigger_type)",
+   "hidden": 1
+  },
+  {
+   "fieldname": "offset_direction",
+   "fieldtype": "Select",
+   "label": "Direction",
+   "options": "Before\nAfter",
+   "default": "Before",
+   "depends_on": "eval:['Date Based'].includes(doc.trigger_type)",
+   "hidden": 1
+  },
+  {
+   "fieldname": "schedule_frequency",
+   "fieldtype": "Select",
+   "label": "Frequency",
+   "depends_on": "eval:['Schedule'].includes(doc.trigger_type)",
+   "options": "\nAll\nHourly\nDaily\nWeekly\nMonthly\nYearly\nHourly Long\nDaily Long\nWeekly Long\nMonthly Long",
+   "hidden": 1
+  },
+  {
+   "fieldname": "triggers",
+   "fieldtype": "Table",
+   "label": "Triggers",
+   "options": "Automation Trigger"
+  },
+  {
+   "fieldname": "filters_tab",
+   "fieldtype": "Tab Break",
+   "label": "Only If"
+  },
+  {
+   "fieldname": "filter_logic",
+   "fieldtype": "Select",
+   "label": "Match",
+   "options": "All\nAny",
+   "default": "All",
+   "hidden": 1
+  },
+  {
+   "fieldname": "filters",
+   "fieldtype": "Table",
+   "label": "Filters",
+   "options": "Automation Filter"
+  },
+  {
+   "fieldname": "advanced_section",
+   "fieldtype": "Section Break",
+   "label": "Advanced",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "condition",
+   "fieldtype": "Code",
+   "label": "Condition",
+   "options": "Python Expression",
+   "permlevel": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "who_tab",
+   "fieldtype": "Tab Break",
+   "label": "Who"
+  },
+  {
+   "fieldname": "phone_field",
+   "fieldtype": "Data",
+   "label": "Phone Field",
+   "description": "Blank = auto-detect",
+   "hidden": 1
+  },
+  {
+   "fieldname": "email_field",
+   "fieldtype": "Data",
+   "label": "Email Field",
+   "description": "Blank = auto-detect",
+   "hidden": 1
+  },
+  {
+   "fieldname": "do_tab",
+   "fieldtype": "Tab Break",
+   "label": "Do"
+  },
+  {
+   "fieldname": "steps",
+   "fieldtype": "Table",
+   "label": "Steps",
+   "options": "Automation Step"
+  },
+  {
+   "fieldname": "variable_mappings",
+   "fieldtype": "Table",
+   "label": "Variable Mappings",
+   "options": "Automation Variable Mapping"
+  },
+  {
+   "fieldname": "edges",
+   "fieldtype": "Table",
+   "label": "Wires",
+   "options": "Automation Edge"
+  },
+  {
+   "fieldname": "recipients",
+   "fieldtype": "Table",
+   "label": "Default Recipients",
+   "options": "Automation Recipient"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Table",
+   "label": "Notes",
+   "options": "Automation Note"
+  },
+  {
+   "fieldname": "settings_tab",
+   "fieldtype": "Tab Break",
+   "label": "Settings"
+  },
+  {
+   "fieldname": "whatsapp_account",
+   "fieldtype": "Link",
+   "label": "WhatsApp Account",
+   "options": "WhatsApp Account"
+  },
+  {
+   "fieldname": "sms_account",
+   "fieldtype": "Link",
+   "label": "SMS Account",
+   "options": "SMS Account"
+  },
+  {
+   "fieldname": "send_frequency",
+   "fieldtype": "Select",
+   "label": "Send",
+   "options": "Every time\nOnce per day\nOnce per document",
+   "default": "Every time"
+  },
+  {
+   "fieldname": "skip_return_documents",
+   "fieldtype": "Check",
+   "label": "Skip Return Documents",
+   "default": "1"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-09-24 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "MSuite Automation",
+ "name": "Messaging Automation",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "permlevel": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "permlevel": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Script Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Script Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "WhatsApp Manager"
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "permlevel": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "MSuite Admin",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "MSuite Admin",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "permlevel": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "WhatsApp Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "permlevel": 0,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "WhatsApp User",
+   "write": 1
+  },
+  {
+   "permlevel": 0,
+   "read": 1,
+   "report": 1,
+   "role": "MSuite Viewer"
+  }
+ ],
+ "row_format": "Dynamic",
+ "show_title_field_in_link": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 1
+}

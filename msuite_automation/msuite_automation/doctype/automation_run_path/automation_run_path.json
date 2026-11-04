@@ -1,0 +1,18 @@
+{
+ "actions": [], "creation": "2026-09-25 12:00:00.000000", "doctype": "DocType", "editable_grid": 1, "engine": "InnoDB",
+ "field_order": ["path_id", "node_id", "status", "executed", "joined", "resume_at", "wait_for_event", "retry_count", "wait_key"],
+ "fields": [
+  {"fieldname": "path_id", "fieldtype": "Data", "label": "Path", "reqd": 1, "in_list_view": 1},
+  {"fieldname": "node_id", "fieldtype": "Data", "label": "Node", "in_list_view": 1},
+  {"fieldname": "status", "fieldtype": "Select", "label": "Status", "options": "Running\nWaiting\nAt join\nEnded", "in_list_view": 1},
+  {"fieldname": "executed", "fieldtype": "Check", "label": "Node Executed"},
+  {"fieldname": "joined", "fieldtype": "Check", "label": "Passed Join"},
+  {"fieldname": "resume_at", "fieldtype": "Datetime", "label": "Resume At", "search_index": 1},
+  {"fieldname": "wait_for_event", "fieldtype": "Check", "label": "Wait for Event"},
+  {"default": "0", "fieldname": "retry_count", "fieldtype": "Int", "label": "Retry Count", "read_only": 1},
+  {"fieldname": "wait_key", "fieldtype": "Data", "hidden": 1, "label": "Wait Key", "length": 140, "no_copy": 1, "search_index": 1}
+ ],
+ "istable": 1, "links": [], "modified": "2026-09-25 12:00:00.000000", "modified_by": "Administrator",
+ "module": "MSuite Automation", "name": "Automation Run Path", "owner": "Administrator", "permissions": [],
+ "sort_field": "modified", "sort_order": "DESC", "states": []
+}

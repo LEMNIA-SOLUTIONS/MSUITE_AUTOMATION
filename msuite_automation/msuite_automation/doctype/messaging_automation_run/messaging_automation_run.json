@@ -1,0 +1,57 @@
+{
+ "actions": [], "autoname": "hash", "creation": "2026-09-24 12:00:00.000000", "doctype": "DocType", "engine": "InnoDB",
+ "field_order": ["automation", "trigger_id", "status", "sent_count", "column_break_1", "reference_doctype", "reference_name",
+  "resume_step_id", "resume_at", "section_log", "context", "log", "paths"],
+ "fields": [
+  {"fieldname": "automation", "fieldtype": "Link", "label": "Automation", "options": "Messaging Automation", "in_list_view": 1, "in_standard_filter": 1, "search_index": 1, "read_only": 1},
+  {"fieldname": "trigger_id", "fieldtype": "Data", "label": "Trigger ID", "read_only": 1},
+  {"fieldname": "status", "fieldtype": "Select", "label": "Status", "options": "Running\nWaiting\nCompleted\nFailed\nSkipped", "in_list_view": 1, "in_standard_filter": 1, "read_only": 1},
+  {"fieldname": "sent_count", "fieldtype": "Int", "label": "Messages Sent", "default": "0", "read_only": 1, "in_list_view": 1, "search_index": 1},
+  {"fieldname": "column_break_1", "fieldtype": "Column Break"},
+  {"fieldname": "reference_doctype", "fieldtype": "Link", "label": "Reference DocType", "options": "DocType", "read_only": 1},
+  {"fieldname": "reference_name", "fieldtype": "Dynamic Link", "label": "Reference Name", "options": "reference_doctype", "in_list_view": 1, "read_only": 1},
+  {"fieldname": "resume_step_id", "fieldtype": "Data", "label": "Resume Step", "read_only": 1},
+  {"fieldname": "resume_at", "fieldtype": "Datetime", "label": "Resume At", "search_index": 1, "read_only": 1},
+  {"fieldname": "section_log", "fieldtype": "Section Break", "label": "Log"},
+  {"fieldname": "context", "fieldtype": "Code", "label": "Context", "options": "JSON", "read_only": 1},
+  {"fieldname": "log", "fieldtype": "Code", "label": "Log", "options": "JSON", "read_only": 1},
+  {"fieldname": "paths", "fieldtype": "Table", "label": "Paths", "options": "Automation Run Path", "read_only": 1}
+ ],
+ "in_create": 1, "links": [], "modified": "2026-09-24 12:00:00.000000", "modified_by": "Administrator",
+ "module": "MSuite Automation", "name": "Messaging Automation Run", "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  },
+  {
+   "delete": 1,
+   "export": 1,
+   "read": 1,
+   "report": 1,
+   "role": "MSuite Admin"
+  },
+  {
+   "permlevel": 0,
+   "read": 1,
+   "report": 1,
+   "role": "WhatsApp Manager"
+  },
+  {
+   "permlevel": 0,
+   "read": 1,
+   "report": 1,
+   "role": "WhatsApp User"
+  },
+  {
+   "permlevel": 0,
+   "read": 1,
+   "report": 1,
+   "role": "MSuite Viewer"
+  }
+ ],
+ "sort_field": "creation", "sort_order": "DESC", "states": [], "track_changes": 0
+}
