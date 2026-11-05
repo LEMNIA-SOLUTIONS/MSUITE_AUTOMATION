@@ -17,6 +17,7 @@ from msuite_automation.msuite_automation.constants import (
 	IG_CONSENT_DEFAULT_EXPIRY_DAYS,
 	IG_CONSENT_MIN_EXPIRY_DAYS,
 )
+from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_automation.msuite_automation.constants import (
 	DATE_BASED, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, RUN_DOCTYPE, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, SCHEDULE,
 	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
@@ -239,10 +240,14 @@ def get_ig_step_meta() -> dict:
 	"""Limits and special values the builder needs for the Instagram mention steps.
 
 	Returns:
-		dict: title_max, subtitle_max, button_title_max, expiry_min, expiry_default, image_source_post.
+		dict: title_max, subtitle_max, button_title_max, expiry_min, expiry_default,
+			image_source_post, templates_enabled.
 
 	Raises:
 		frappe.PermissionError: Caller cannot read Messaging Automation.
+
+	Side Effects:
+		None.
 	"""
 	check_read(DOCTYPE)
 	return {
@@ -252,7 +257,39 @@ def get_ig_step_meta() -> dict:
 		"expiry_min": IG_CONSENT_MIN_EXPIRY_DAYS,
 		"expiry_default": IG_CONSENT_DEFAULT_EXPIRY_DAYS,
 		"image_source_post": IG_CONSENT_IMAGE_SOURCE_POST,
+		"templates_enabled": messenger_templates.is_templates_enabled(),
 	}
+
+
+@frappe.whitelist()
+def get_condition_edit_access(name: str | None = None) -> bool:
+	"""Check whether the current user has permission to edit automation conditions.
+
+	Enforces read permission, role write access, document ownership (when name is
+	provided), and permlevel 1 write access where condition fields reside.
+
+	Args:
+		name: Optional document name of a Messaging Automation record.
+
+	Returns:
+		bool: True if caller has write access and permlevel 1 access to edit conditions;
+			False otherwise.
+
+	Raises:
+		frappe.PermissionError: Caller cannot read Messaging Automation or is a Guest.
+
+	Side Effects:
+		None.
+	"""
+	check_read(DOCTYPE, name)
+	if name:
+		if not frappe.has_permission(DOCTYPE, "write", doc=name):
+			return False
+	else:
+		if not frappe.has_permission(DOCTYPE, "write"):
+			return False
+	return 1 in frappe.get_meta(DOCTYPE).get_permlevel_access("write")
+
 
 
 @frappe.whitelist()

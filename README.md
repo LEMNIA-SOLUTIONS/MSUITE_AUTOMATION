@@ -1,6 +1,13 @@
 ### MSuite Automation
 
-MSuite Automation for the MSuite platform.
+MSuite Automation for the MSuite platform: event triggers, filters, multi-step actions, and visual workflow execution.
+
+#### Features & Permissions
+- **Automation Condition Edit Permissions**: `get_condition_edit_access` validates role write access, document ownership (for specific automations), and permlevel 1 permissions before allowing condition modifications.
+- **Instagram Mention Consent & Templates**:
+  - `get_ig_step_meta`: Returns step configuration limits, expiry windows, and `templates_enabled` flag.
+  - `send_ig_consent_template`: Skips execution with `RESULT_SKIPPED_TEMPLATES_DISABLED` when site-level messenger templates flag is disabled.
+
 
 ### Installation
 

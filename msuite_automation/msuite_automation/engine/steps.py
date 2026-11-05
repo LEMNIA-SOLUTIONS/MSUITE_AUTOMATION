@@ -26,6 +26,7 @@ from msuite_automation.msuite_automation.constants import (
 	IG_REPLY_SUPPORTED_TYPES,
 )
 from msuite_inbox.inbox.services import ig_consent
+from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_inbox.inbox.services.mentions import graph
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
@@ -41,6 +42,7 @@ from msuite_automation.msuite_automation.constants import (
 	RESULT_SKIPPED_NO_CONSENT_RECORD,
 	RESULT_SKIPPED_PREFIX,
 	RESULT_SKIPPED_REPLY_REFUSED,
+	RESULT_SKIPPED_TEMPLATES_DISABLED,
 	RESULT_SKIPPED_UNSUPPORTED_TYPE,
 	RETRY_MENTION_PENDING,
 	SEND_EMAIL,
@@ -261,7 +263,8 @@ def send_ig_consent_template(ctx, step) -> str:
 		step: Automation Step document/dict containing step configuration.
 
 	Returns:
-		str: Execution result ("sent", "skipped: ...").
+		str: Execution result ("sent", "skipped: ..."). Returns RESULT_SKIPPED_TEMPLATES_DISABLED
+			when messenger/instagram templates are disabled for the site.
 
 	Raises:
 		ValueError: If doc is not a Social Mention.
@@ -270,10 +273,13 @@ def send_ig_consent_template(ctx, step) -> str:
 	Side Effects:
 		Acquires a duplicate-send lock (kept after a send, released on failure).
 		Sends generic template message via Instagram DM service. May transition
-		Instagram Consent Response records to Failed.
+		Instagram Consent Response records to Failed. None when skipped.
 	"""
 	doc = ctx.doc
 	_require_mention(doc, SEND_IG_CONSENT_TEMPLATE)
+
+	if not messenger_templates.is_templates_enabled():
+		return RESULT_SKIPPED_TEMPLATES_DISABLED
 
 	consent_names = frappe.get_all(
 		IG_CONSENT_DOCTYPE,

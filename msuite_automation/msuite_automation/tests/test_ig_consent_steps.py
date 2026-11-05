@@ -27,7 +27,11 @@ from msuite_automation.msuite_automation.constants import (
 	IG_CONSENT_DEFAULT_EXPIRY_DAYS,
 	IG_CONSENT_NOTE_IG_LOGIN,
 )
-from msuite_inbox.inbox.constants import IG_CONSENT_FAILED, IG_CONSENT_PENDING_DM
+from msuite_inbox.inbox.constants import (
+	IG_CONSENT_FAILED,
+	IG_CONSENT_PENDING_DM,
+	MESSENGER_TEMPLATES_FLAG,
+)
 from msuite_inbox.inbox.services.mentions.graph import MentionTransient, MentionUnresolvable
 from msuite_automation.msuite_automation import constants as C
 from msuite_automation.msuite_automation.constants import (
@@ -54,14 +58,40 @@ class TestIGConsentConstants(unittest.TestCase):
 		self.assertIn(SEND_IG_CONSENT_TEMPLATE, ACTION_TYPES)
 		self.assertNotIn(SEND_IG_CONSENT_TEMPLATE, SEND_STEPS)
 
+		self.assertEqual(C.RESULT_SKIPPED_TEMPLATES_DISABLED, "skipped: templates disabled")
+
+
 
 class TestIGConsentSteps(unittest.TestCase):
 	"""Unit and integration tests for IG public reply and consent template steps."""
 
 	def setUp(self):
+		"""Set up test environment and enable messenger templates flag.
+
+		What:
+			Prepares test fixtures by clearing tracked documents, running database
+			and cache cleanup, creating a test Instagram social account, and patching
+			frappe.conf with MESSENGER_TEMPLATES_FLAG=True so tests are self-contained.
+
+		Params:
+			None.
+
+		Returns:
+			None.
+
+		Raises:
+			None.
+
+		Side effects:
+			Rolls back db transaction, deletes cache keys, inserts a Social Account,
+			and starts frappe.conf patch with addCleanup registered to stop it.
+		"""
 		self._created_docs = []
 		self._cleanup()
 		self.account_name = self._make_account()
+		patcher = patch.dict(frappe.conf, {MESSENGER_TEMPLATES_FLAG: True})
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def tearDown(self):
 		self._cleanup()
@@ -594,6 +624,71 @@ class TestIGConsentSteps(unittest.TestCase):
 		self.assertEqual(steps.execute(ctx, self._card_step()), "skipped: nope")
 		self.assertEqual(steps.execute(ctx, self._card_step()), "skipped: nope")
 		self.assertEqual(mock_send.call_count, 2)
+
+	@patch("msuite_inbox.inbox.services.ig_consent.send_consent_template")
+	def test_consent_template_templates_disabled_skipped(self, mock_send):
+		"""Verify consent card is skipped with distinct constant when templates flag is off."""
+		doc = self._make_mention()
+		consent = self._make_dm_received_consent(doc)
+		ctx = self._make_ctx(doc)
+
+		with patch.dict(frappe.conf, {MESSENGER_TEMPLATES_FLAG: False}):
+			res = steps.execute(ctx, self._card_step())
+
+		self.assertEqual(res, C.RESULT_SKIPPED_TEMPLATES_DISABLED)
+		mock_send.assert_not_called()
+
+		consent.reload()
+		self.assertEqual(consent.status, IG_CONSENT_DM_RECEIVED)
+		self.assertFalse(consent.failure_reason)
+
+	@patch("msuite_inbox.inbox.services.ig_consent.send_consent_template")
+	def test_consent_template_run_automation_logs_skipped_templates_disabled(self, mock_send):
+		"""Verify automation run logs RESULT_SKIPPED_TEMPLATES_DISABLED when templates disabled."""
+		from msuite_automation.msuite_automation.api import automations as api
+		from msuite_automation.msuite_automation.engine import executor
+
+		doc = self._make_mention()
+		consent = self._make_dm_received_consent(doc)
+
+		auto = api.save_automation({
+			"title": "Consent Auto Test",
+			"disabled": 0,
+			"triggers": [{"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": SOCIAL_MENTION_DOCTYPE, "doc_event": "After Save"}],
+			"steps": [{"step_id": "s1", "step_type": SEND_IG_CONSENT_TEMPLATE, "ig_template_title": "Title", "ig_yes_label": "Yes", "ig_no_label": "No", "ig_view_label": "View"}],
+			"edges": [{"source_id": "t1", "source_handle": "", "target_id": "s1"}],
+		})
+		self._created_docs.append((C.DOCTYPE, auto["name"]))
+
+		with patch.dict(frappe.conf, {MESSENGER_TEMPLATES_FLAG: False}):
+			run_name = executor.run_automation(auto["name"], "t1", SOCIAL_MENTION_DOCTYPE, doc.name)
+
+		self.assertIsNotNone(run_name)
+		self._created_docs.append((C.RUN_DOCTYPE, run_name))
+
+		run = frappe.get_doc(C.RUN_DOCTYPE, run_name)
+		log_entries = json.loads(run.log or "[]")
+		step_entry = next((e for e in log_entries if e.get("step_id") == "s1"), None)
+		self.assertIsNotNone(step_entry)
+		self.assertEqual(step_entry.get("result"), C.RESULT_SKIPPED_TEMPLATES_DISABLED)
+		mock_send.assert_not_called()
+
+		consent.reload()
+		self.assertEqual(consent.status, IG_CONSENT_DM_RECEIVED)
+
+	@patch("msuite_inbox.inbox.services.ig_consent.send_consent_template", return_value={"ok": True})
+	def test_consent_template_flag_on_sends(self, mock_send):
+		"""Verify consent card send proceeds when templates flag is on."""
+		doc = self._make_mention()
+		self._make_dm_received_consent(doc)
+		ctx = self._make_ctx(doc)
+
+		with patch.dict(frappe.conf, {MESSENGER_TEMPLATES_FLAG: True}):
+			res = steps.execute(ctx, self._card_step())
+
+		self.assertEqual(res, C.RESULT_SENT)
+		mock_send.assert_called_once()
+
 
 	def test_validation_image_source(self):
 		T = {"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "Social Mention"}
