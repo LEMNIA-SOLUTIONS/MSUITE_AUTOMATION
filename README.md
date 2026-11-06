@@ -7,6 +7,7 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 - **Instagram Mention Consent & Templates**:
   - `get_ig_step_meta`: Returns step configuration limits, expiry windows, and `templates_enabled` flag.
   - `send_ig_consent_template`: Skips execution with `RESULT_SKIPPED_TEMPLATES_DISABLED` when site-level messenger templates flag is disabled.
+  - The mention nodes are always listed in the builder but the automation cannot be saved unless every trigger is a Social Mention trigger.
 
 
 ### Installation
