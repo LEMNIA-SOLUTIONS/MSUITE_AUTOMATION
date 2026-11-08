@@ -8,6 +8,10 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
   - `get_ig_step_meta`: Returns step configuration limits, expiry windows, and `templates_enabled` flag.
   - `send_ig_consent_template`: Skips execution with `RESULT_SKIPPED_TEMPLATES_DISABLED` when site-level messenger templates flag is disabled.
   - The mention nodes are always listed in the builder but the automation cannot be saved unless every trigger is a Social Mention trigger.
+- **Plan Limits & Gating (`msuite_plan_gates`)**:
+  - `Messaging Automation`: Channel feature checks (`notifications`, `lead_automation`, `order_automation`) combined with `automation_active` (product `AUTOMATION`, `period="total"`, filters `disabled=0`). Allows saving disabled automations and editing already-active automations without consuming extra capacity.
+  - `Messaging Automation Run`: Execution log gated by `automation_runs_per_month` (product `AUTOMATION`, `period="month"`), limiting execution runs created per calendar month.
+  - Proactive 80% soft warning before hitting limits; transitional bypass when keys are missing from plan payload.
 
 
 ### Installation
