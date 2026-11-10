@@ -64,6 +64,7 @@ def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", 
 	row = frappe.get_doc({"doctype": OUTBOX_DOCTYPE, "payload": json.dumps(payload, default=str)}).insert(ignore_permissions=True)
 	enqueue_safely(DELIVER_OUTBOX_PATH, queue=QUEUE_SHORT,
 		job_id=f"{OUTBOX_JOB_PREFIX}:{row.name}", deduplicate=True, outbox=row.name)
+	return row.name
 
 
 def deliver_outbox(outbox) -> None:
@@ -253,6 +254,7 @@ def _node_executor(automation, graph, ctx, log):
 			ctx,
 			automation=effective_automation(automation, step, ctx.doc.doctype),
 			retrying=cint(path.get("retry_count")) > 0,
+			entry=entry,
 		)
 		try:
 			entry["result"] = S.execute(node_ctx, step)

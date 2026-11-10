@@ -45,7 +45,9 @@ def dry_run(automation, doc, trigger_id=None) -> dict:
 def _dry_run(automation, doc, trigger_id):
 	trigger = trigger_row(automation, trigger_id, doc.get("doctype"))
 	ref = doc.get("name")
-	out = {"trigger_id": trigger.trigger_id if trigger else trigger_id, "filters": _filters(automation, trigger, doc),
+	out = {"trigger_id": trigger.trigger_id if trigger else trigger_id,
+		"trigger": _trigger_check(trigger, doc),
+		"filters": _filters(automation, trigger, doc),
 		"already_ran": bool(automation.name and ref) and _already_ran(automation.name, automation.send_frequency, doc.get("doctype"), ref),
 		"steps": [], "paths": []}
 	if trigger is None:
@@ -96,6 +98,62 @@ def _dry_run(automation, doc, trigger_id):
 				"error": p["error"],
 			})
 	return out
+
+
+def _trigger_check(trigger, doc) -> dict:
+	"""Check if the trigger would fire for the document in dry-run preview.
+
+	Args:
+		trigger: The Automation Trigger row/dict.
+		doc: The target document or dict.
+
+	Returns:
+		dict: {"matches": bool | None, "reason": str}
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	if not trigger:
+		return {"matches": None, "reason": "No trigger configured"}
+
+	tt = trigger.trigger_type
+	if tt == "Field Change":
+		from msuite_automation.msuite_automation.engine.triggers import normalize
+		field = trigger.field
+		current_raw = doc.get(field) if hasattr(doc, "get") else getattr(doc, field, None)
+		current_norm = normalize(current_raw)
+		to_norm = normalize(trigger.to_value)
+		note_from = " (from_value cannot be verified from current record state)" if trigger.from_value else ""
+
+		if trigger.to_value:
+			if current_norm.lower() == to_norm.lower():
+				return {"matches": True, "reason": f"Field '{field}' currently matches '{trigger.to_value}'{note_from}"}
+			return {"matches": False, "reason": f"Field '{field}' currently '{current_raw or 'blank'}' does not match '{trigger.to_value}'{note_from}"}
+		else:
+			if current_norm:
+				return {"matches": True, "reason": f"Field '{field}' is currently set to '{current_raw}'{note_from}"}
+			return {"matches": False, "reason": f"Field '{field}' is currently empty{note_from}"}
+
+	if tt == "Date Based":
+		from frappe.utils import add_to_date, nowdate
+		date_field = trigger.date_field
+		val = doc.get(date_field) if hasattr(doc, "get") else getattr(doc, date_field, None)
+		if not val:
+			return {"matches": False, "reason": f"Date field '{date_field}' is currently empty"}
+		days = int(trigger.offset_days or 0) * (1 if trigger.offset_direction == "Before" else -1)
+		target_day = str(add_to_date(nowdate(), days=days))
+		val_day = str(val)[:10]
+		if val_day == target_day:
+			return {"matches": True, "reason": f"Date field '{date_field}' ({val_day}) matches target date ({target_day})"}
+		return {"matches": False, "reason": f"Date field '{date_field}' ({val_day}) does not match target date ({target_day})"}
+
+	if tt in ("Document Event", "Schedule"):
+		return {"matches": None, "reason": "not evaluated"}
+
+	return {"matches": None, "reason": "not evaluated"}
 
 
 def _filters(automation, trigger, doc) -> dict:
@@ -150,6 +208,9 @@ def _preview(automation, step, doc) -> dict:
 	eff = effective_automation(automation, step, doc.get("doctype"))
 	t = step.step_type
 	if t == SEND_WHATSAPP:
+		ctx = frappe._dict(automation=eff, doc=doc)
+		if S._is_marketing_opted_out(ctx, step):
+			return {"skipped": "opted out"}
 		if step.delivery_mode == "Bulk campaign":
 			to = channels.resolve_phone(eff, doc)
 			return {"bulk": True, "to": to} if to else {"skipped": "no recipient"}

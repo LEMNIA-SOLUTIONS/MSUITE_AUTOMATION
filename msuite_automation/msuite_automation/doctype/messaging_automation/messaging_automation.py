@@ -13,10 +13,24 @@ from frappe import _
 from frappe.model.document import Document
 
 from msuite_automation.msuite_automation.constants import (
-	DATE_BASED, DOCUMENT_EVENT, EVERY_TIME, FIELD_CHANGE, IF_ELSE, SCHEDULE, SEND_WHATSAPP, SWITCH, UPDATE_FIELD,
+	ADD_TO_LIST,
+	DATE_BASED,
+	DOCUMENT_EVENT,
+	EVERY_TIME,
+	FIELD_CHANGE,
+	IF_ELSE,
+	OFFSET_DAYS_MAX,
+	OFFSET_DAYS_MIN,
+	SCHEDULE,
+	SEND_EMAIL,
+	SEND_SMS,
+	SEND_WHATSAPP,
+	SWITCH,
+	UPDATE_FIELD,
 )
 from msuite_automation.msuite_automation.engine.graph import (
 	Graph,
+	_to_int,
 	validate_activation,
 	validate_graph,
 	validate_warnings,
@@ -69,8 +83,12 @@ class MessagingAutomation(Document):
 					frappe.throw(_("Trigger {0}: field to watch is required").format(label))
 				if t.from_value and t.to_value and t.from_value == t.to_value:
 					frappe.throw(_("Trigger {0}: From and To cannot be the same").format(label))
-			if kind == DATE_BASED and not t.date_field:
-				frappe.throw(_("Trigger {0}: Date field is required").format(label))
+			if kind == DATE_BASED:
+				if not t.date_field:
+					frappe.throw(_("Trigger {0}: Date field is required").format(label))
+				offset = _to_int(t.offset_days)
+				if offset is None or offset < OFFSET_DAYS_MIN or offset > OFFSET_DAYS_MAX:
+					frappe.throw(_("Trigger {0}: offset days must be a whole number from {1} to {2}").format(label, OFFSET_DAYS_MIN, OFFSET_DAYS_MAX))
 			if kind == SCHEDULE and not t.schedule_frequency:
 				frappe.throw(_("Trigger {0}: Frequency is required").format(label))
 
@@ -95,11 +113,44 @@ class MessagingAutomation(Document):
 		return issues
 
 	@staticmethod
-	def _check(fieldname, doctype, what):
+	def _resolve_doctype_field(fieldname, doctype):
+		"""Resolve fieldname and DocType, handling prefixes like sales_order. on Delivery Note.
+
+		Args:
+			fieldname: Name of the field, possibly prefixed.
+			doctype: Name of the DocType.
+
+		Returns:
+			tuple[str, str]: Resolved (fieldname, doctype).
+
+		Raises:
+			None.
+
+		Side Effects:
+			None.
+		"""
+		if fieldname and doctype and fieldname.startswith("sales_order.") and doctype == "Delivery Note":
+			return fieldname[len("sales_order."):], "Sales Order"
+		return fieldname, doctype
+
+	@classmethod
+	def _check(cls, fieldname, doctype, what):
+		"""Validate that a field exists on the target DocType.
+
+		Args:
+			fieldname: Name of the field to check.
+			doctype: Target DocType name.
+			what: Human-readable context descriptor for error messages.
+
+		Raises:
+			frappe.ValidationError: If the field does not exist.
+
+		Side Effects:
+			None.
+		"""
 		if not fieldname or not doctype:
 			return
-		if fieldname.startswith("sales_order.") and doctype == "Delivery Note":
-			fieldname, doctype = fieldname[len("sales_order."):], "Sales Order"
+		fieldname, doctype = cls._resolve_doctype_field(fieldname, doctype)
 		if fieldname not in STANDARD_DOC_FIELDS and not frappe.get_meta(doctype).has_field(fieldname):
 			frappe.throw(_("{0}: field {1} does not exist on {2}").format(what, fieldname, doctype))
 
@@ -124,8 +175,17 @@ class MessagingAutomation(Document):
 		graph = Graph(self.triggers, self.steps, self.edges)
 		for st in self.steps:
 			what = _("Step {0}").format(st.step_id)
-			if st.step_type == UPDATE_FIELD and st.update_field in PROTECTED_UPDATE_FIELDS:
-				frappe.throw(_("Step {0}: field {1} cannot be updated").format(st.step_id, st.update_field))
+			if st.step_type == UPDATE_FIELD:
+				if st.update_field in PROTECTED_UPDATE_FIELDS:
+					frappe.throw(_("Step {0}: field {1} cannot be updated").format(st.step_id, st.update_field))
+				for dt in graph.reaching_doctypes(st.step_id):
+					fld_name, target_dt = self._resolve_doctype_field(st.update_field, dt)
+					if fld_name and fld_name not in STANDARD_DOC_FIELDS and frappe.get_meta(target_dt).has_field(fld_name):
+						df = frappe.get_meta(target_dt).get_field(fld_name)
+						if df and df.reqd:
+							val = st.update_value
+							if val is None or str(val).strip() == "":
+								frappe.throw(_("Step {0}: {1} is required and cannot be blank").format(st.step_id, df.label or fld_name))
 			rules = _json(st.condition_rules, []) if st.step_type == IF_ELSE else []
 			for rule in rules if isinstance(rules, list) else []:
 				if not isinstance(rule, dict):
@@ -137,7 +197,21 @@ class MessagingAutomation(Document):
 				check(st.switch_field if st.step_type == SWITCH else None, dt, what)
 				for rule in rules if isinstance(rules, list) else []:
 					check(rule.get("field"), dt, what)
-				check(send_to.get(dt), dt, what)
+				send_to_field = send_to.get(dt)
+				check(send_to_field, dt, what)
+				if send_to_field:
+					fld_name, target_dt = self._resolve_doctype_field(send_to_field, dt)
+					if fld_name and fld_name not in STANDARD_DOC_FIELDS and frappe.get_meta(target_dt).has_field(fld_name):
+						df = frappe.get_meta(target_dt).get_field(fld_name)
+						opts = (df.options or "").strip().lower()
+						if st.step_type in (SEND_WHATSAPP, SEND_SMS, ADD_TO_LIST):
+							is_phone = df.fieldtype == "Phone" or (df.fieldtype in ("Data", "Small Text") and opts == "phone")
+							if not is_phone:
+								frappe.throw(_("Step {0}: {1} on {2} is not a valid phone field").format(st.step_id, send_to_field, dt))
+						elif st.step_type == SEND_EMAIL:
+							is_email = df.fieldtype == "Email" or (df.fieldtype in ("Data", "Small Text") and opts == "email")
+							if not is_email:
+								frappe.throw(_("Step {0}: {1} on {2} is not a valid email field").format(st.step_id, send_to_field, dt))
 		for m in self.variable_mappings:
 			what = _("Step {0} variable").format(m.step_id)
 			if m.reference_doctype:

@@ -244,10 +244,159 @@ class TestAutomationsApi(unittest.TestCase):
 		self.assertEqual(runs[1]["log"][0]["result"], "sent")
 		self.assertEqual(len(api.get_runs(name, limit=1)), 1)
 
+	def test_aut113_failed_run_error_in_get_runs_and_last_run(self):
+		name = api.save_automation(self._payload(title="ZZ failed run test"))["name"]
+		failed_log = json.dumps([
+			{"step_id": "s1", "step_type": "Send SMS", "result": "sent"},
+			{"step_id": "s2", "step_type": "Send WhatsApp", "result": "error", "error": "WhatsApp provider timeout"},
+		])
+		frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"status": "Failed",
+			"log": failed_log,
+		}).insert(ignore_permissions=True, ignore_links=True)
+
+		runs = api.get_runs(name)
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0].get("error"), "WhatsApp provider timeout")
+
+		list_res = api.get_automations(search="ZZ failed run test")
+		item = next(it for it in list_res["items"] if it["name"] == name)
+		self.assertIsNotNone(item.get("last_run"))
+		self.assertEqual(item["last_run"].get("status"), "Failed")
+		self.assertEqual(item["last_run"].get("error"), "WhatsApp provider timeout")
+
+	def test_aut114_retry_run_validations_and_success(self):
+		name = api.save_automation(self._payload(title="ZZ retry test"))["name"]
+
+		# 1. Missing run
+		with self.assertRaises(frappe.DoesNotExistError):
+			api.retry_run("non_existent_run_id")
+
+		# 2. Non-Failed run rejected
+		completed_run = frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"status": "Completed",
+			"log": "[]",
+		}).insert(ignore_permissions=True, ignore_links=True)
+		with self.assertRaises(frappe.ValidationError):
+			api.retry_run(completed_run.name)
+
+		# 3. Invalid context rejected
+		invalid_ctx_run = frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"status": "Failed",
+			"context": "",
+			"log": "[]",
+		}).insert(ignore_permissions=True, ignore_links=True)
+		with self.assertRaises(frappe.ValidationError):
+			api.retry_run(invalid_ctx_run.name)
+
+		# 4. Successful retry calls enqueue_run with skip_checks=True and returns new run name
+		ctx_data = {"value": "42", "discriminator": "disc", "doc_dict": {"field": "val"}, "phone": "+919876543210"}
+		failed_run = frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"trigger_id": "t1",
+			"reference_doctype": "ToDo",
+			"reference_name": "TD-1",
+			"status": "Failed",
+			"context": json.dumps(ctx_data),
+			"log": json.dumps([{"result": "error", "error": "timeout"}]),
+		}).insert(ignore_permissions=True, ignore_links=True)
+
+		with patch("msuite_automation.msuite_automation.engine.executor.enqueue_run", return_value="new_run_name_123") as mock_enqueue:
+			res = api.retry_run(failed_run.name)
+			self.assertEqual(res, {"name": "new_run_name_123"})
+			mock_enqueue.assert_called_once_with(
+				name=name,
+				trigger_id="t1",
+				doctype="ToDo",
+				docname="TD-1",
+				value="42",
+				discriminator="disc",
+				doc_dict={"field": "val"},
+				skip_checks=True,
+				phone="+919876543210",
+			)
+
+		# 5. Permission denied for guest
+		with patch("msuite_automation.msuite_automation.api.automations.check_write", side_effect=frappe.PermissionError):
+			with self.assertRaises(frappe.PermissionError):
+				api.retry_run(failed_run.name)
+
 	def test_get_runs_negative_limit(self):
 		name = api.save_automation(self._payload())["name"]
 		runs = api.get_runs(name, limit=-1)
 		self.assertIsInstance(runs, list)
+
+	def test_aut120_get_runs_merges_channel_message_status(self):
+		name = api.save_automation(self._payload(title="ZZ aut120 merge test"))["name"]
+		log_data = json.dumps([
+			{"step_id": "wa1", "step_type": "Send WhatsApp", "result": "sent", "message": "CM-TEST-1"},
+			{"step_id": "wa2", "step_type": "Send WhatsApp", "result": "sent", "message": "CM-TEST-2"},
+		])
+		frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"status": "Completed",
+			"log": log_data,
+		}).insert(ignore_permissions=True, ignore_links=True)
+
+		real_get_all = frappe.get_all
+		cm_calls = []
+
+		def mock_get_all(doctype, *args, **kwargs):
+			if doctype == "Channel Message":
+				cm_calls.append((doctype, kwargs))
+				return [
+					{"name": "CM-TEST-1", "status": "read", "status_error": None},
+					{"name": "CM-TEST-2", "status": "failed", "status_error": "User blocked sender"},
+				]
+			return real_get_all(doctype, *args, **kwargs)
+
+		with patch("frappe.get_all", side_effect=mock_get_all):
+			runs = api.get_runs(name)
+
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(len(cm_calls), 1)
+		self.assertEqual(runs[0]["log"][0]["status"], "read")
+		self.assertEqual(runs[0]["log"][1]["status"], "failed")
+		self.assertEqual(runs[0]["log"][1]["status_error"], "User blocked sender")
+
+	def test_aut120_get_runs_empty_log_no_channel_message_query(self):
+		name = api.save_automation(self._payload(title="ZZ aut120 empty log"))["name"]
+		frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"status": "Completed",
+			"log": "[]",
+		}).insert(ignore_permissions=True, ignore_links=True)
+
+		real_get_all = frappe.get_all
+		cm_calls = []
+
+		def mock_get_all(doctype, *args, **kwargs):
+			if doctype == "Channel Message":
+				cm_calls.append((doctype, kwargs))
+				return []
+			return real_get_all(doctype, *args, **kwargs)
+
+		with patch("frappe.get_all", side_effect=mock_get_all):
+			runs = api.get_runs(name)
+
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(len(cm_calls), 0)
+		self.assertEqual(runs[0]["log"], [])
+
+	def test_aut120_get_runs_permission_denied_for_guest(self):
+		name = api.save_automation(self._payload())["name"]
+		with patch("msuite_automation.msuite_automation.api.automations.check_read", side_effect=frappe.PermissionError):
+			with self.assertRaises(frappe.PermissionError):
+				api.get_runs(name)
 
 	def test_paging_and_total_count(self):
 		for i in range(3):
