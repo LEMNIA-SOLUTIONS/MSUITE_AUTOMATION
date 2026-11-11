@@ -438,7 +438,8 @@ def retry_run(run_name: str) -> dict:
 	Raises:
 		frappe.PermissionError: If user lacks write permission on Messaging Automation.
 		frappe.DoesNotExistError: If run_name does not exist.
-		frappe.ValidationError: If run is not Failed or context is empty/invalid.
+		frappe.ValidationError: If run is not Failed, context is empty/invalid, the automation is
+			paused, or the record is gone and the run saved no copy of it.
 
 	Side Effects:
 		Inserts an Automation Outbox record and schedules delivery.
@@ -455,6 +456,11 @@ def retry_run(run_name: str) -> dict:
 	ctx = _json(run.context, None)
 	if not ctx or not isinstance(ctx, dict):
 		frappe.throw(_("Cannot retry run with empty or invalid context"))
+	# run_automation skips silently in these two cases, so refuse up front instead of queuing a no-op.
+	if frappe.db.get_value(DOCTYPE, run.automation, "disabled"):
+		frappe.throw(_("Turn the automation on before retrying this run."))
+	if not ctx.get("doc_dict") and not frappe.db.exists(run.reference_doctype, run.reference_name):
+		frappe.throw(_("The record for this run no longer exists, so it can't be retried."))
 	new_name = enqueue_run(
 		name=run.automation,
 		trigger_id=run.trigger_id,

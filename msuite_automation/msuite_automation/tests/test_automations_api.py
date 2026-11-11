@@ -296,6 +296,7 @@ class TestAutomationsApi(unittest.TestCase):
 			api.retry_run(invalid_ctx_run.name)
 
 		# 4. Successful retry calls enqueue_run with skip_checks=True and returns new run name
+		frappe.db.set_value("Messaging Automation", name, "disabled", 0)
 		ctx_data = {"value": "42", "discriminator": "disc", "doc_dict": {"field": "val"}, "phone": "+919876543210"}
 		failed_run = frappe.get_doc({
 			"doctype": "Messaging Automation Run",
@@ -328,6 +329,40 @@ class TestAutomationsApi(unittest.TestCase):
 		with patch("msuite_automation.msuite_automation.api.automations.check_write", side_effect=frappe.PermissionError):
 			with self.assertRaises(frappe.PermissionError):
 				api.retry_run(failed_run.name)
+
+	def _failed_run(self, automation, ref_name, context):
+		return frappe.get_doc({
+			"doctype": "Messaging Automation Run", "automation": automation, "trigger_id": "t1",
+			"reference_doctype": "ToDo", "reference_name": ref_name, "status": "Failed",
+			"context": json.dumps(context), "log": "[]",
+		}).insert(ignore_permissions=True, ignore_links=True)
+
+	def test_retry_run_refuses_a_paused_automation(self):
+		"""A paused automation never runs, so the retry would silently do nothing: refuse with a clear message."""
+		name = api.save_automation(self._payload(title="ZZ retry paused"))["name"]  # saved disabled
+		run = self._failed_run(name, "TD-1", {"value": "", "doc_dict": {"name": "TD-1"}})
+		with patch("msuite_automation.msuite_automation.engine.executor.enqueue_run") as enqueue:
+			with self.assertRaises(frappe.ValidationError) as cm:
+				api.retry_run(run.name)
+			enqueue.assert_not_called()
+		self.assertIn("Turn the automation on", str(cm.exception))
+
+	def test_retry_run_refuses_when_the_record_is_gone_and_nothing_was_saved(self):
+		name = api.save_automation(self._payload(title="ZZ retry gone"))["name"]
+		frappe.db.set_value("Messaging Automation", name, "disabled", 0)
+		run = self._failed_run(name, "ZZ-NO-SUCH-TODO", {"value": "Closed"})
+		with patch("msuite_automation.msuite_automation.engine.executor.enqueue_run") as enqueue:
+			with self.assertRaises(frappe.ValidationError) as cm:
+				api.retry_run(run.name)
+			enqueue.assert_not_called()
+		self.assertIn("no longer exists", str(cm.exception))
+
+	def test_retry_run_allows_a_deleted_record_when_the_run_saved_its_data(self):
+		name = api.save_automation(self._payload(title="ZZ retry saved"))["name"]
+		frappe.db.set_value("Messaging Automation", name, "disabled", 0)
+		run = self._failed_run(name, "ZZ-NO-SUCH-TODO", {"value": "Closed", "doc_dict": {"doctype": "ToDo", "name": "ZZ-NO-SUCH-TODO"}})
+		with patch("msuite_automation.msuite_automation.engine.executor.enqueue_run", return_value="new1"):
+			self.assertEqual(api.retry_run(run.name), {"name": "new1"})
 
 	def test_get_runs_negative_limit(self):
 		name = api.save_automation(self._payload())["name"]
