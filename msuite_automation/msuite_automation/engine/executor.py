@@ -56,11 +56,11 @@ def enqueue_safely(method, **kwargs) -> None:
 	frappe.db.after_commit.add(enqueue_call)
 
 
-def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None):
+def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
 	"""Record a trigger event in the outbox (same transaction as the caller's save, so it commits or rolls
 	back with it) and queue its delivery after commit. If the queued job is lost, redeliver_outbox re-queues it."""
 	payload = dict(name=name, trigger_id=trigger_id, doctype=doctype, docname=docname, value=value,
-		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone)
+		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone, retry=retry)
 	row = frappe.get_doc({"doctype": OUTBOX_DOCTYPE, "payload": json.dumps(payload, default=str)}).insert(ignore_permissions=True)
 	enqueue_safely(DELIVER_OUTBOX_PATH, queue=QUEUE_SHORT,
 		job_id=f"{OUTBOX_JOB_PREFIX}:{row.name}", deduplicate=True, outbox=row.name)
@@ -310,7 +310,8 @@ def _walk(automation, run, doc, ctx_data, paths):
 	_persist(run, paths, log)
 
 
-def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None):
+def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
+	"""Run one automation for one record. `retry=True` marks a user-requested retry of a failed run, which does not count toward the monthly run limit."""
 	run, claim_key, run_saved = None, None, False
 	try:
 		automation = frappe.get_doc(DOCTYPE, name)
@@ -345,6 +346,7 @@ def run_automation(name, trigger_id, doctype, docname, value="", discriminator="
 		run = frappe.get_doc({"doctype": RUN_DOCTYPE, "automation": name, "trigger_id": trigger.trigger_id, "status": "Running",
 			"reference_doctype": doctype, "reference_name": ref_name, "context": json.dumps(ctx_data, default=str),
 			"log": json.dumps([{"path_id": "p1", "node_id": trigger.trigger_id, "step_id": trigger.trigger_id, "step_type": "Trigger", "result": "started", "at": str(now_datetime())}])})
+		run.flags.is_retry = bool(retry)
 		run.insert(ignore_permissions=True, ignore_links=True)
 		run_saved = True
 		_walk(automation, run, doc, ctx_data, start_paths(trigger.trigger_id))

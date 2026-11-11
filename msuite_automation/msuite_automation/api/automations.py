@@ -426,8 +426,8 @@ def retry_run(run_name: str) -> dict:
 
 	Note:
 		A run where only some steps failed can resend already-sent steps (existing
-		already_sent/retrying guards limit this) and each retry counts against the
-		monthly run plan gate (plan_gates.py).
+		already_sent/retrying guards limit this). A retry does not count toward the
+		monthly run plan gate.
 
 	Args:
 		run_name: Name of the failed Messaging Automation Run document.
@@ -465,6 +465,7 @@ def retry_run(run_name: str) -> dict:
 		doc_dict=ctx.get("doc_dict"),
 		skip_checks=True,
 		phone=ctx.get("phone"),
+		retry=True,
 	)
 	return {"name": new_name}
 

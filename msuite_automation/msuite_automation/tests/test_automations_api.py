@@ -321,6 +321,7 @@ class TestAutomationsApi(unittest.TestCase):
 				doc_dict={"field": "val"},
 				skip_checks=True,
 				phone="+919876543210",
+				retry=True,
 			)
 
 		# 5. Permission denied for guest

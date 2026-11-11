@@ -20,7 +20,7 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 - **Send-to field types**: WhatsApp, SMS and Add to List need a Phone field, Send Email needs an Email field; a blank Update Field value is rejected when the target field is mandatory.
 - **Dry run (`engine/preview.py`)**: the result carries a `trigger` check (Field Change current value, Date Based date window; Document Event / Schedule are "not evaluated"). Steps are still previewed when the trigger would not match. Skipped steps show their reason on the canvas node.
 - **Run log**: failed runs expose the error in `get_runs` / `last_run`; WhatsApp steps record the `Channel Message` name and `get_runs` joins its live `status` / `status_error` (sent → delivered → read, or failed + reason).
-- **`retry_run(run_name)`** (whitelisted, needs write access): creates a new run from a `Failed` run's stored context, skipping the trigger checks. The old run stays as history; the retry counts against the monthly run limit and can resend steps that already succeeded before the failure.
+- **`retry_run(run_name)`** (whitelisted, needs write access): creates a new run from a `Failed` run's stored context, skipping the trigger checks. The old run stays as history; the retry does not count toward the monthly run limit, and can resend steps that already succeeded before the failure.
 - **Opt-out**: a recipient who opted out (Contact flag, Audience Member, or Channel Handle `opted_out`) is skipped for MARKETING templates only; utility templates and free-form text are still sent.
 
 ### Installation
