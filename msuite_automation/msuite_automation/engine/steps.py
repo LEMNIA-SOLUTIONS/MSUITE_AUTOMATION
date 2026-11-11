@@ -30,6 +30,7 @@ from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_inbox.inbox.services.mentions import graph
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
+	AUTOMATION_WRITE_FLAG,
 	CONTEXT_MENTION_REPLY,
 	ONCE_PER_DAY,
 	ONCE_PER_DOCUMENT,
@@ -131,6 +132,17 @@ def update_value(doc, step):
 	if df and df.fieldtype in ("Float", "Currency", "Percent"):
 		return frappe.utils.flt(value)
 	return value
+
+
+def _save_field(doc, field, value) -> None:
+	"""Save one field with doc.save(), so every rule of the record applies as for a manual edit: mandatory
+	fields, permissions and other apps' validations (e.g. the Lead pipeline). Raises when a rule rejects the
+	value; the step then fails with that message and the record keeps its old value. The flag stops this
+	save from starting other automations."""
+	record = frappe.get_doc(doc.doctype, doc.name)
+	record.set(field, value)
+	record.flags[AUTOMATION_WRITE_FLAG] = True
+	record.save()
 
 
 def set_in_memory(doc, field, value):
@@ -426,7 +438,7 @@ def execute(ctx, step) -> str:
 		return _send(ctx, step, "sms", lambda: channels.send_sms(a, step, doc))
 	if step.step_type == UPDATE_FIELD:
 		value = update_value(doc, step)
-		frappe.db.set_value(doc.doctype, doc.name, step.update_field, value)
+		_save_field(doc, step.update_field, value)
 		set_in_memory(doc, step.update_field, value)
 		return "updated"
 	if step.step_type == ADD_TO_LIST:

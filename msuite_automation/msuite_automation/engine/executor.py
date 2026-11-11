@@ -15,7 +15,7 @@ from msuite_core.constants import LOGGER_NAME
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST, DOCTYPE, IF_ELSE, ONCE_PER_DAY, ONCE_PER_DOCUMENT, OUTBOX_DOCTYPE, PATH_RUNNING, PATH_WAITING, QUEUE_SHORT,
 	RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX, SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
-	STUCK_SWEEP_BATCH, SWITCH, WAIT, WAIT_EVENT, WAIT_SIGNAL,
+	STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
 )
 from msuite_automation.msuite_automation.engine import channels
 from msuite_automation.msuite_automation.engine import steps as S
@@ -280,7 +280,9 @@ def _persist(run, paths, log) -> None:
 		if str(entry.get("step_type", "")).startswith("Send"):
 			node_key = (entry.get("path_id"), entry.get("node_id") or entry.get("step_id"))
 			last_sends[node_key] = entry
-	failed = bool(last_sends) and all(entry.get("result") == "error" for entry in last_sends.values())
+	# A rejected Update Field value fails the run; sends fail it only when every send errored.
+	update_failed = any(entry.get("step_type") == UPDATE_FIELD and entry.get("result") == "error" for entry in log)
+	failed = update_failed or (bool(last_sends) and all(entry.get("result") == "error" for entry in last_sends.values()))
 	waiting = any(p["status"] == PATH_WAITING for p in paths)
 	run.set("paths", [{"path_id": p["path_id"], "node_id": p["node_id"], "status": p["status"],
 		"executed": 1 if p.get("executed") else 0, "joined": 1 if p.get("joined") else 0,

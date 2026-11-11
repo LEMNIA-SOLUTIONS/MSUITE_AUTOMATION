@@ -9,6 +9,8 @@ CHILD_DOCTYPE = "Automation Variable Mapping"
 DOCTYPE_EVENT = "DocType Event"
 SCHEDULER_EVENT = "Scheduler Event"
 LEAD_STATUS_EVENT = "Lead Status Event"
+# Set on a record an automation step saves, so that save never starts other automations (no loops).
+AUTOMATION_WRITE_FLAG = "from_messaging_automation_step"
 ORDER_WORKFLOW_EVENT = "Order Workflow Event"
 NOTIFICATION_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT)
 ALL_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT, LEAD_STATUS_EVENT, ORDER_WORKFLOW_EVENT)
