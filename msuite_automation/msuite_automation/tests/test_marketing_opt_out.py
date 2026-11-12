@@ -28,6 +28,7 @@ class TestMarketingOptOut(unittest.TestCase):
 			doc = frappe.get_doc("WhatsApp Templates", name)
 			doc.category = category
 			doc.flags.ignore_permissions = True
+			doc.flags.ignore_validate = True
 			with patch("msuite_whatsapp.services.templates.template_service.push_to_meta"):
 				doc.save(ignore_permissions=True)
 		else:
@@ -40,6 +41,7 @@ class TestMarketingOptOut(unittest.TestCase):
 				"template": "Hello world",
 			})
 			doc.flags.ignore_permissions = True
+			doc.flags.ignore_validate = True
 			with patch("msuite_whatsapp.services.templates.template_service.push_to_meta"):
 				doc.insert(ignore_permissions=True)
 			self.templates_to_cleanup.append(doc.name)
@@ -213,7 +215,7 @@ class TestMarketingOptOut(unittest.TestCase):
 		)
 
 		def exists(doctype, filters=None):
-			return doctype == "Contact" and filters.get("phone_e164") == "+919876543210" and filters.get("unsubscribed_whatsapp") == 1
+			return doctype == "Contact" and filters.get("phone_e164") == "+919876543210" and (filters.get("unsubscribed_whatsapp") == 1 or filters.get("unsubscribed") == 1)
 
 		with patch(f"{CH}.already_sent", return_value=False), \
 		     patch(f"{BS}.is_opted_out", return_value=False), \
@@ -221,6 +223,42 @@ class TestMarketingOptOut(unittest.TestCase):
 		     patch(f"{CH}.send_whatsapp") as mock_send:
 			self.assertEqual(steps.execute(ctx, step), "skipped: opted out")
 			mock_send.assert_not_called()
+
+	def test_aut119_handle_only_opt_out_skipped(self):
+		"""AUT-119: Channel Handle metadata opted_out skips marketing template upfront."""
+		tpl_name = self._make_template("test_promo_handle_only", "MARKETING")
+		step = frappe._dict(step_id="s1", step_type=SEND_WHATSAPP, template=tpl_name, delivery_mode="Direct")
+		ctx = frappe._dict(
+			automation=frappe._dict(name="dummy-auto-h", send_frequency="Every time", phone_field="phone"),
+			doc=frappe._dict(doctype="ToDo", name="dummy-doc-h"), phone="+919876543210",
+		)
+
+		def mock_get_all(doctype, filters=None, **kwargs):
+			if doctype == "Channel Handle":
+				return [{"name": "CH-1", "metadata": '{"opted_out": true}'}]
+			return []
+
+		with patch(f"{CH}.already_sent", return_value=False), \
+		     patch(f"{BS}.is_opted_out", return_value=False), \
+		     patch("frappe.db.exists", return_value=False), \
+		     patch("frappe.db.get_all", side_effect=mock_get_all), \
+		     patch(f"{CH}.send_whatsapp") as mock_send:
+			res = steps.execute(ctx, step)
+			self.assertEqual(res, "skipped: opted out")
+			mock_send.assert_not_called()
+
+	def test_aut119_free_form_with_opt_out_still_sent(self):
+		"""AUT-119: Free-form WhatsApp (no template) is not blocked by opt-out."""
+		step = frappe._dict(step_id="s1", step_type=SEND_WHATSAPP, template=None, delivery_mode="Direct")
+		ctx = frappe._dict(
+			automation=frappe._dict(name="dummy-auto-free", send_frequency="Every time", phone_field="phone"),
+			doc=frappe._dict(doctype="ToDo", name="dummy-doc-free"), phone="+919876543210",
+		)
+		with patch(f"{CH}.already_sent", return_value=False), \
+		     patch(f"{CH}.send_whatsapp", return_value=True) as mock_send:
+			res = steps.execute(ctx, step)
+			self.assertEqual(res, "sent")
+			mock_send.assert_called_once()
 
 	def test_h6_utility_whatsapp_to_opted_out_contact_sends(self):
 		"""UTILITY WhatsApp to opted-out contact sends (never blocked by opt-out)."""

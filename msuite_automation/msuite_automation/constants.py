@@ -9,6 +9,8 @@ CHILD_DOCTYPE = "Automation Variable Mapping"
 DOCTYPE_EVENT = "DocType Event"
 SCHEDULER_EVENT = "Scheduler Event"
 LEAD_STATUS_EVENT = "Lead Status Event"
+# Set on a record an automation step saves, so that save never starts other automations (no loops).
+AUTOMATION_WRITE_FLAG = "from_messaging_automation_step"
 ORDER_WORKFLOW_EVENT = "Order Workflow Event"
 NOTIFICATION_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT)
 ALL_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT, LEAD_STATUS_EVENT, ORDER_WORKFLOW_EVENT)
@@ -30,6 +32,8 @@ RUN_DOCTYPE = "Messaging Automation Run"
 OUTBOX_DOCTYPE = "Automation Event Outbox"
 
 # ── Engine limits (one home; behavior-neutral names for values that used to be inline) ──
+OFFSET_DAYS_MIN = 1
+OFFSET_DAYS_MAX = 10
 QUEUE_SHORT = "short"  # RQ queue for every automation job
 RUN_CLAIM_TTL_SECONDS = 15 * 60  # per-document run claim; covers the gap between the duplicate check and the run row's commit
 STUCK_SWEEP_BATCH = 200  # Running runs failed per sweeper pass

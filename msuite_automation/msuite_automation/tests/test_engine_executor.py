@@ -19,6 +19,7 @@ def make(steps, edges, triggers=None, disabled=0, **kw):
 		"triggers": triggers or [{"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "ToDo", "doc_event": "After Save"}],
 		"steps": steps, "edges": [{"source_id": a, "source_handle": h, "target_id": b} for a, h, b in edges], **kw})
 	doc.flags.ignore_plan_gate = True
+	doc.flags.ignore_validate = True
 	doc.insert(ignore_permissions=True, ignore_links=True)
 	if not disabled:
 		frappe.db.set_value("Messaging Automation", doc.name, "disabled", 0)
@@ -258,3 +259,14 @@ class TestFailedRunCap(unittest.TestCase):
 		before = frappe.db.count(RUN_DOCTYPE, {"automation": name})
 		self.assertIsNone(executor.run_automation(name, "t1", "ToDo", ref))
 		self.assertEqual(frappe.db.count(RUN_DOCTYPE, {"automation": name}), before)
+
+	@patch(f"{CH}.send_whatsapp", return_value="CM-AUT-120-VAL")
+	def test_aut120_send_whatsapp_records_channel_message_in_run_log(self, *_):
+		name = make([{"step_id": "wa", "step_type": "Send WhatsApp", "template": "test_tpl"}],
+			[("t1", "", "wa")])
+		ref = todo()
+		run = executor.run_automation(name, "t1", "ToDo", ref)
+		log = json.loads(frappe.db.get_value(RUN_DOCTYPE, run, "log"))
+		entry = next(e for e in log if e["step_id"] == "wa")
+		self.assertEqual(entry["result"], "sent")
+		self.assertEqual(entry.get("message"), "CM-AUT-120-VAL")

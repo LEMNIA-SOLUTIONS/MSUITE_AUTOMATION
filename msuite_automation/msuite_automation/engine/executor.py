@@ -15,7 +15,7 @@ from msuite_core.constants import LOGGER_NAME
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST, DOCTYPE, IF_ELSE, ONCE_PER_DAY, ONCE_PER_DOCUMENT, OUTBOX_DOCTYPE, PATH_RUNNING, PATH_WAITING, QUEUE_SHORT,
 	RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX, SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
-	STUCK_SWEEP_BATCH, SWITCH, WAIT, WAIT_EVENT, WAIT_SIGNAL,
+	STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
 )
 from msuite_automation.msuite_automation.engine import channels
 from msuite_automation.msuite_automation.engine import steps as S
@@ -56,14 +56,15 @@ def enqueue_safely(method, **kwargs) -> None:
 	frappe.db.after_commit.add(enqueue_call)
 
 
-def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None):
+def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
 	"""Record a trigger event in the outbox (same transaction as the caller's save, so it commits or rolls
 	back with it) and queue its delivery after commit. If the queued job is lost, redeliver_outbox re-queues it."""
 	payload = dict(name=name, trigger_id=trigger_id, doctype=doctype, docname=docname, value=value,
-		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone)
+		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone, retry=retry)
 	row = frappe.get_doc({"doctype": OUTBOX_DOCTYPE, "payload": json.dumps(payload, default=str)}).insert(ignore_permissions=True)
 	enqueue_safely(DELIVER_OUTBOX_PATH, queue=QUEUE_SHORT,
 		job_id=f"{OUTBOX_JOB_PREFIX}:{row.name}", deduplicate=True, outbox=row.name)
+	return row.name
 
 
 def deliver_outbox(outbox) -> None:
@@ -253,6 +254,7 @@ def _node_executor(automation, graph, ctx, log):
 			ctx,
 			automation=effective_automation(automation, step, ctx.doc.doctype),
 			retrying=cint(path.get("retry_count")) > 0,
+			entry=entry,
 		)
 		try:
 			entry["result"] = S.execute(node_ctx, step)
@@ -278,7 +280,9 @@ def _persist(run, paths, log) -> None:
 		if str(entry.get("step_type", "")).startswith("Send"):
 			node_key = (entry.get("path_id"), entry.get("node_id") or entry.get("step_id"))
 			last_sends[node_key] = entry
-	failed = bool(last_sends) and all(entry.get("result") == "error" for entry in last_sends.values())
+	# A rejected Update Field value fails the run; sends fail it only when every send errored.
+	update_failed = any(entry.get("step_type") == UPDATE_FIELD and entry.get("result") == "error" for entry in log)
+	failed = update_failed or (bool(last_sends) and all(entry.get("result") == "error" for entry in last_sends.values()))
 	waiting = any(p["status"] == PATH_WAITING for p in paths)
 	run.set("paths", [{"path_id": p["path_id"], "node_id": p["node_id"], "status": p["status"],
 		"executed": 1 if p.get("executed") else 0, "joined": 1 if p.get("joined") else 0,
@@ -308,7 +312,8 @@ def _walk(automation, run, doc, ctx_data, paths):
 	_persist(run, paths, log)
 
 
-def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None):
+def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
+	"""Run one automation for one record. `retry=True` marks a user-requested retry of a failed run, which does not count toward the monthly run limit."""
 	run, claim_key, run_saved = None, None, False
 	try:
 		automation = frappe.get_doc(DOCTYPE, name)
@@ -343,6 +348,7 @@ def run_automation(name, trigger_id, doctype, docname, value="", discriminator="
 		run = frappe.get_doc({"doctype": RUN_DOCTYPE, "automation": name, "trigger_id": trigger.trigger_id, "status": "Running",
 			"reference_doctype": doctype, "reference_name": ref_name, "context": json.dumps(ctx_data, default=str),
 			"log": json.dumps([{"path_id": "p1", "node_id": trigger.trigger_id, "step_id": trigger.trigger_id, "step_type": "Trigger", "result": "started", "at": str(now_datetime())}])})
+		run.flags.is_retry = bool(retry)
 		run.insert(ignore_permissions=True, ignore_links=True)
 		run_saved = True
 		_walk(automation, run, doc, ctx_data, start_paths(trigger.trigger_id))

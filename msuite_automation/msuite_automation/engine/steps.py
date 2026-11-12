@@ -30,6 +30,7 @@ from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_inbox.inbox.services.mentions import graph
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
+	AUTOMATION_WRITE_FLAG,
 	CONTEXT_MENTION_REPLY,
 	ONCE_PER_DAY,
 	ONCE_PER_DOCUMENT,
@@ -72,6 +73,24 @@ def _dedupe_key(ctx, step, channel):
 
 
 def _send(ctx, step, channel, fn):
+	"""Execute an outbound message send, handling deduplication locks and logging.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, value, entry, etc.
+		step: Step definition dict or object.
+		channel: Channel short code ('wa', 'email', 'sms') for deduplication locking.
+		fn: Callable executing the channel send and returning status or message identifier.
+
+	Returns:
+		str: 'sent' on success, or a skip reason ('skipped: duplicate', 'skipped: opted out', 'skipped: no recipient').
+
+	Raises:
+		channels.SendRetry: When a transient failure or lock issue occurs.
+		Exception: On unexpected failures during send.
+
+	Side Effects:
+		Acquires/releases redis deduplication locks; mutates ctx.entry with Channel Message name when available.
+	"""
 	a = ctx.automation
 	lock = _dedupe_key(ctx, step, channel) if a.send_frequency not in (ONCE_PER_DAY, ONCE_PER_DOCUMENT) and ctx.value else None
 	if lock:
@@ -92,6 +111,14 @@ def _send(ctx, step, channel, fn):
 		raise
 	if not ok and lock:
 		channels.release_lock(lock)
+	if ok:
+		msg_name = None
+		if isinstance(ok, str) and ok != "sent":
+			msg_name = ok
+		elif isinstance(ok, dict):
+			msg_name = ok.get("message")
+		if msg_name and getattr(ctx, "entry", None) is not None and isinstance(ctx.entry, dict):
+			ctx.entry["message"] = msg_name
 	return "sent" if ok else "skipped: no recipient"
 
 
@@ -107,6 +134,17 @@ def update_value(doc, step):
 	return value
 
 
+def _save_field(doc, field, value) -> None:
+	"""Save one field with doc.save(), so every rule of the record applies as for a manual edit: mandatory
+	fields, permissions and other apps' validations (e.g. the Lead pipeline). Raises when a rule rejects the
+	value; the step then fails with that message and the record keeps its old value. The flag stops this
+	save from starting other automations."""
+	record = frappe.get_doc(doc.doctype, doc.name)
+	record.set(field, value)
+	record.flags[AUTOMATION_WRITE_FLAG] = True
+	record.save()
+
+
 def set_in_memory(doc, field, value):
 	if callable(getattr(doc, "set", None)):
 		doc.set(field, value)
@@ -115,6 +153,27 @@ def set_in_memory(doc, field, value):
 
 
 def _is_marketing_opted_out(ctx, step) -> bool:
+	"""Check if the recipient is opted out of WhatsApp marketing communications.
+
+	Opted out means ANY of:
+	1. Contact unsubscribed_whatsapp or unsubscribed flags.
+	2. Audience Member unsubscribed_whatsapp (checked via channels.whatsapp_opted_out).
+	3. Channel Handle metadata opted_out flag.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, and optional phone.
+		step: Step definition containing step attributes or dict.
+
+	Returns:
+		bool: True if marketing template and recipient is opted out via Contact,
+			Audience Member, or Channel Handle metadata; False otherwise.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
 	tpl_name = getattr(step, "template", None) or (step.get("template") if isinstance(step, dict) else None)
 	if not tpl_name:
 		return False
@@ -133,11 +192,44 @@ def _is_marketing_opted_out(ctx, step) -> bool:
 
 	parsed = phone_validator.normalize(phone)
 	phone_e164 = parsed.get("e164") or phone
-	# STOP from a number outside every Audience only flags the Contact, so check both stores.
-	return channels.whatsapp_opted_out(phone_e164) or any(
-		frappe.db.exists("Contact", {col: val, "unsubscribed_whatsapp": 1})
-		for col, val in (("phone_e164", phone_e164), ("mobile_no", phone))
-	)
+
+	# 1. Contact flags: unsubscribed_whatsapp or unsubscribed
+	for col, val in (("phone_e164", phone_e164), ("mobile_no", phone)):
+		if not val:
+			continue
+		if frappe.db.exists("Contact", {col: val, "unsubscribed_whatsapp": 1}) or frappe.db.exists("Contact", {col: val, "unsubscribed": 1}):
+			return True
+
+	# 2. Audience Member unsubscription & WhatsApp app opt-out
+	if channels.whatsapp_opted_out(phone_e164):
+		return True
+
+	# 3. Channel Handle metadata opted_out flag
+	clean = str(phone_e164 or phone).strip()
+	digits = "".join(c for c in clean if c.isdigit())
+	candidates = list({clean, digits, f"+{digits}"} - {"", "+"})
+	handles = frappe.db.get_all(
+		"Channel Handle",
+		filters={"channel_type": "WhatsApp", "platform_handle": ["in", candidates]},
+		fields=["name", "metadata"],
+	) or []
+	if not handles:
+		handles = frappe.db.get_all(
+			"Channel Handle",
+			filters={"channel_type": "WhatsApp", "bsuid": ["in", candidates]},
+			fields=["name", "metadata"],
+		) or []
+	for h in handles:
+		meta = h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)
+		if isinstance(meta, str):
+			try:
+				meta = json.loads(meta)
+			except Exception:
+				meta = {}
+		if isinstance(meta, dict) and meta.get("opted_out"):
+			return True
+
+	return False
 
 
 def _require_mention(doc, step_type: str) -> None:
@@ -346,7 +438,7 @@ def execute(ctx, step) -> str:
 		return _send(ctx, step, "sms", lambda: channels.send_sms(a, step, doc))
 	if step.step_type == UPDATE_FIELD:
 		value = update_value(doc, step)
-		frappe.db.set_value(doc.doctype, doc.name, step.update_field, value)
+		_save_field(doc, step.update_field, value)
 		set_in_memory(doc, step.update_field, value)
 		return "updated"
 	if step.step_type == ADD_TO_LIST:

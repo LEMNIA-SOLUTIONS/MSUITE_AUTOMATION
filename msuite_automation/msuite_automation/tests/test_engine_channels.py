@@ -43,6 +43,17 @@ class TestChannels(unittest.TestCase):
 		self.assertEqual(send.call_args.kwargs["whatsapp_account"], "acc")
 		self.assertEqual(send.call_args.kwargs["reference_name"], "L1")
 
+	@patch(f"{CH}.send_to_phone", return_value={"ok": True, "message": "CM-TEST-1"})
+	@patch(f"{CH}._template")
+	def test_send_whatsapp_returns_channel_message_name(self, tpl, send):
+		tpl.return_value = frappe._dict(name="t", language_code="en", parameter_format="POSITIONAL", template="Hi",
+			header_type=None, buttons=[])
+		a = frappe._dict(name="MA-1", whatsapp_account="acc", phone_field=None, variable_mappings=[])
+		step = frappe._dict(step_id="wa", template="t", header_source="None", button_fields=None)
+		doc = frappe._dict(doctype="CRM Lead", name="L1", mobile_no="9876543210")
+		res = channels.send_whatsapp(a, step, doc)
+		self.assertEqual(res, "CM-TEST-1")
+
 	@patch(f"{CH}.frappe.sendmail")
 	def test_send_email(self, sendmail):
 		a = frappe._dict(name="MA-1", email_field="email_id")

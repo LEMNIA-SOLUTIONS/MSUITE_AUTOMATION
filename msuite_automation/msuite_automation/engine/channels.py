@@ -363,7 +363,26 @@ def build_whatsapp(automation, step, doc, phone=None) -> dict | None:
 		"account": _get(automation, "whatsapp_account") or None}
 
 
-def send_whatsapp(automation, step, doc, phone=None) -> bool:
+def send_whatsapp(automation, step, doc, phone=None) -> str | bool:
+	"""Send a WhatsApp message via outbound service.
+
+	Args:
+		automation: The Automation document.
+		step: Step definition dict or object.
+		doc: Trigger document.
+		phone: Optional override recipient phone number.
+
+	Returns:
+		str | bool: Channel Message name if available, otherwise True on success; False if no phone.
+
+	Raises:
+		RecipientOptedOut: If recipient opted out of marketing templates.
+		SendRetry: If messaging limit reached or retryable error occurs.
+		RuntimeError: If WhatsApp send fails permanently.
+
+	Side Effects:
+		Dispatches WhatsApp message via inbox outbound service.
+	"""
 	msg = build_whatsapp(automation, step, doc, phone)
 	doc_data = _doc_data(doc)
 	if not msg:
@@ -389,6 +408,8 @@ def send_whatsapp(automation, step, doc, phone=None) -> bool:
 		if res.get("retry"):
 			raise SendRetry(res["retry"], res.get("error") or "WhatsApp send failed")
 		raise RuntimeError(res.get("error") or "WhatsApp send failed")
+	if isinstance(res, dict) and res.get("message"):
+		return res["message"]
 	return True
 
 

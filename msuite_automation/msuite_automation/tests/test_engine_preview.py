@@ -51,6 +51,50 @@ class TestDryRun(unittest.TestCase):
 	def tearDown(self):
 		frappe.db.rollback()
 
+	def test_trigger_check_field_change(self):
+		auto_fc = automation(triggers=[{
+			"trigger_id": "t1", "trigger_type": "Field Change", "reference_doctype": "ToDo",
+			"field": "status", "to_value": "Closed", "from_value": "Open",
+		}])
+		out_mismatch = preview.dry_run(auto_fc, todo(status="Open"))
+		self.assertIn("trigger", out_mismatch)
+		self.assertFalse(out_mismatch["trigger"]["matches"])
+		self.assertIn("currently", out_mismatch["trigger"]["reason"].lower())
+
+		out_match = preview.dry_run(auto_fc, todo(status="Closed"))
+		self.assertTrue(out_match["trigger"]["matches"])
+		self.assertIn("currently", out_match["trigger"]["reason"].lower())
+
+	def test_trigger_check_date_based(self):
+		from frappe.utils import add_to_date, nowdate
+		today = nowdate()
+		auto_date = automation(triggers=[{
+			"trigger_id": "t1", "trigger_type": "Date Based", "reference_doctype": "ToDo",
+			"date_field": "date", "offset_days": 2, "offset_direction": "Before",
+		}])
+		# 2 days Before target date means record date is today + 2 days
+		matching_date = str(add_to_date(today, days=2))
+		out_match = preview.dry_run(auto_date, todo(date=matching_date))
+		self.assertTrue(out_match["trigger"]["matches"])
+
+		out_mismatch = preview.dry_run(auto_date, todo(date=today))
+		self.assertFalse(out_mismatch["trigger"]["matches"])
+
+	def test_trigger_check_doc_event_and_schedule(self):
+		auto_event = automation(triggers=[{
+			"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "ToDo", "doc_event": "After Save",
+		}])
+		out_event = preview.dry_run(auto_event, todo())
+		self.assertIsNone(out_event["trigger"]["matches"])
+		self.assertEqual(out_event["trigger"]["reason"], "not evaluated")
+
+		auto_sched = automation(triggers=[{
+			"trigger_id": "t1", "trigger_type": "Schedule", "reference_doctype": "ToDo", "schedule_frequency": "Daily",
+		}])
+		out_sched = preview.dry_run(auto_sched, todo())
+		self.assertIsNone(out_sched["trigger"]["matches"])
+		self.assertEqual(out_sched["trigger"]["reason"], "not evaluated")
+
 	@patch(f"{CH}.send_to_phone")
 	@patch(f"{CH}.frappe.sendmail")
 	@patch("frappe.db.set_value")
