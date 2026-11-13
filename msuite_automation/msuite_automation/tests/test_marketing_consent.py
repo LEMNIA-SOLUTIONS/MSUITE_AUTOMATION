@@ -39,6 +39,7 @@ class TestMarketingConsent(unittest.TestCase):
 		"""Run steps.execute with every external lookup mocked; returns (result, send mock)."""
 		with patch(f"{CH}.already_sent", return_value=False), \
 		     patch("frappe.db.get_value", side_effect=_category_lookup(category)), \
+		     patch("frappe.get_meta", return_value=frappe._dict(has_field=lambda f: True)), \
 		     patch("frappe.db.get_single_value", return_value=setting), \
 		     patch("frappe.db.exists", return_value=False), \
 		     patch("frappe.db.get_all", return_value=[]), \
@@ -76,19 +77,48 @@ class TestMarketingConsent(unittest.TestCase):
 		res, _ = self._run(setting=0, consent=False, opted_out=True)
 		self.assertEqual(res, RESULT_SKIPPED_OPTED_OUT)
 
-	def test_setting_field_missing_counts_as_on(self):
+	def test_setting_field_missing_counts_as_on_without_reading_it(self):
+		"""Before migrate the field is not in the meta: treat as on, never call get_single_value (no message_log noise)."""
+		meta = frappe._dict(has_field=lambda f: False)
 		with patch("frappe.db.get_value", side_effect=_category_lookup("MARKETING")), \
-		     patch("frappe.db.get_single_value", side_effect=frappe.ValidationError("no field")), \
+		     patch("frappe.get_meta", return_value=meta), \
+		     patch("frappe.db.get_single_value", side_effect=frappe.ValidationError("no field")) as read, \
 		     patch(f"{CH}.whatsapp_has_consent", return_value=False):
 			self.assertTrue(steps._lacks_marketing_consent(_ctx(), _step()))
+		self.assertNotIn("WhatsApp Settings", [c.args[0] for c in read.call_args_list if c.args])
 
-	def test_setting_not_migrated_counts_as_on(self):
-		res, _ = self._run(setting=None, consent=False)
-		self.assertEqual(res, RESULT_SKIPPED_NO_CONSENT)
+	def test_setting_zero_means_off(self):
+		"""Frappe returns 0 for a Check with no Singles row; the migrate patch writes 1 so 0 is always an explicit choice."""
+		res, send = self._run(setting=0, consent=False)
+		self.assertEqual(res, "sent")
+
+	def test_scheduled_contact_list_skips_no_consent_quietly(self):
+		"""run_scheduled legacy _contact_list path: RecipientNoConsent is a skip, not a logged error."""
+		from msuite_automation.msuite_automation.engine import channels, executor
+		trigger = frappe._dict(trigger_id="t1", trigger_type="Schedule", reference_doctype="ToDo", condition="x")
+		automation = frappe._dict(name="A", triggers=[trigger], steps=[], edges=[], send_frequency="Every time", as_dict=lambda: {})
+		step = frappe._dict(step_id="s", step_type=SEND_WHATSAPP)
+		graph = type("G", (), {"steps": {"s": step}, "targets": lambda self, t: ["s"]})()
+
+		def fake_exec(code, glob, scope):
+			scope.doc["_contact_list"] = ["+919876543210"]
+
+		with patch("frappe.get_doc", return_value=automation), \
+		     patch.object(executor, "trigger_row", return_value=trigger), \
+		     patch.object(executor, "safe_exec", side_effect=fake_exec), \
+		     patch.object(executor, "get_safe_globals", return_value={}), \
+		     patch.object(executor, "Graph", return_value=graph), \
+		     patch.object(executor, "effective_automation", side_effect=lambda a, *_: a), \
+		     patch(f"{CH}.format_number", side_effect=lambda p: p), \
+		     patch(f"{CH}.send_whatsapp", side_effect=channels.RecipientNoConsent("x")), \
+		     patch("frappe.log_error") as log_error:
+			executor.run_scheduled("A", trigger_id="t1")
+		log_error.assert_not_called()
 
 	def test_dry_run_shows_no_consent(self):
 		with patch("frappe.db.get_value", side_effect=_category_lookup("MARKETING")), \
 		     patch(f"{CH}.resolve_phone", return_value=PHONE), \
+		     patch("frappe.get_meta", return_value=frappe._dict(has_field=lambda f: True)), \
 		     patch("frappe.db.get_single_value", return_value=1), \
 		     patch(f"{CH}.whatsapp_has_consent", return_value=False), \
 		     patch.object(steps, "_is_marketing_opted_out", return_value=False), \
@@ -148,6 +178,17 @@ class TestHasMarketingConsent(unittest.TestCase):
 		for f in contact_filters:
 			self.assertEqual(f["unsubscribed_whatsapp"], 0)
 			self.assertEqual(f["consent_updated_at"], ["is", "set"])
+
+	def test_bsuid_is_not_digit_stripped(self):
+		"""A BSUID must only match itself, never another person's phone handle (IN.919876543210 vs +919876543210)."""
+		seen = []
+		with patch.object(automation_channel, "is_opted_out", return_value=False), \
+		     patch("frappe.db.exists", side_effect=lambda dt, f=None, *a, **k: seen.append(f) or False):
+			automation_channel.has_marketing_consent("IN.919876543210")
+		for f in seen:
+			vals = [v for k, v in f.items() if isinstance(v, list) and v and v[0] == "in"]
+			for v in vals:
+				self.assertEqual(v[1], ["IN.919876543210"])
 
 	def test_opt_out_wins(self):
 		self.assertFalse(self._check([("Channel Handle", "platform_handle")], opted_out=True))

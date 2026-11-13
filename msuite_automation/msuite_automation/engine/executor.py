@@ -614,7 +614,7 @@ def run_scheduled(name, trigger_id=None) -> None:
 				for s in wa:
 					try:
 						channels.send_whatsapp(effective_automation(automation, s, trigger.reference_doctype), s, frappe._dict(doctype=None, name=None), phone=channels.format_number(phone))
-					except channels.RecipientOptedOut:
+					except (channels.RecipientOptedOut, channels.RecipientNoConsent):
 						continue
 					except Exception:
 						frappe.log_error(title=f"Messaging Automation {name}: scheduled send to {phone} failed")

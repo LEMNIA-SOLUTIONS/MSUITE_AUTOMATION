@@ -195,7 +195,7 @@ def _lacks_marketing_consent(ctx, step) -> bool:
 	"""Check if a MARKETING template send lacks a recorded WhatsApp opt-in.
 
 	Only applies when the WhatsApp Settings option `require_marketing_opt_in` is on
-	(a site that has not migrated yet counts as on). Callers check opt-out first, so
+	(a site that has not migrated yet counts as on; migrate writes 1). Callers check opt-out first, so
 	an opted-out recipient keeps the "opted out" result.
 
 	Args:
@@ -214,11 +214,9 @@ def _lacks_marketing_consent(ctx, step) -> bool:
 	phone = _marketing_recipient_phone(ctx, step)
 	if not phone:
 		return False
-	try:
-		required = frappe.db.get_single_value("WhatsApp Settings", REQUIRE_OPT_IN_FIELD)
-	except frappe.ValidationError:  # field not migrated yet: use its default (on)
-		required = None
-	if required is not None and not int(required):
+	# Field missing from the meta means "not migrated yet": default on. After migrate the
+	# patch writes 1, so a stored 0 is always an explicit admin choice.
+	if frappe.get_meta("WhatsApp Settings").has_field(REQUIRE_OPT_IN_FIELD) and not frappe.db.get_single_value("WhatsApp Settings", REQUIRE_OPT_IN_FIELD):
 		return False
 	phone_e164 = phone_validator.normalize(phone).get("e164") or phone
 	return not channels.whatsapp_has_consent(phone_e164)
