@@ -157,8 +157,9 @@ def _run_as_owner(owner):
 		owner: the Messaging Automation's owner (user id); empty counts as unusable.
 
 	Raises:
-		frappe.ValidationError: owner is empty, missing or disabled
-		frappe.PermissionError: owner may not update the record (message names the owner) (never falls back to Administrator).
+		frappe.ValidationError: owner is empty, missing or disabled (never falls back to Administrator).
+		frappe.PermissionError: owner may not update the record (bare errors get a message naming the owner;
+			errors that already carry a reason keep it).
 
 	Side Effects:
 		frappe.set_user; the previous user is restored in finally, also when the block raises.
@@ -174,7 +175,9 @@ def _run_as_owner(owner):
 		frappe.set_user(owner)
 		yield
 	except frappe.PermissionError as e:
-		# Frappe's own PermissionError carries no text; say whose permission was missing.
+		# Frappe's own bare write PermissionError has no text: name the owner. Errors with a reason keep it.
+		if str(e).strip():
+			raise
 		raise frappe.PermissionError(OWNER_NO_WRITE_MESSAGE.format(owner)) from e
 	finally:
 		frappe.set_user(previous)

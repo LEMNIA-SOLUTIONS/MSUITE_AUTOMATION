@@ -133,6 +133,14 @@ class TestUpdateFieldRunsAsAutomationOwner(IntegrationTestCase):
 		self.assertEqual(frappe.session.user, SYSTEM_USER)
 		self.assertEqual(frappe.db.get_value("ToDo", self.todo.name, "status"), "Open")
 
+	def test_a_permission_error_with_its_own_text_keeps_that_text(self):
+		"""Another app's rule raising PermissionError must not be relabelled as the owner's missing write access."""
+		with patch.object(ToDo, "validate", side_effect=frappe.PermissionError("Link field X is not allowed")):
+			with self.assertRaises(frappe.PermissionError) as cm:
+				steps.execute(self._ctx(OWNER), _step())
+		self.assertEqual(str(cm.exception), "Link field X is not allowed")
+		self.assertEqual(frappe.session.user, SYSTEM_USER)
+
 	def test_real_executor_path_runs_the_save_as_the_owner(self):
 		"""C1 regression: effective_automation must carry the owner, or real runs silently save as Administrator."""
 		from msuite_automation.msuite_automation.engine import executor
