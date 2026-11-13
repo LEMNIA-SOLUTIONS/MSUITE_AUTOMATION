@@ -13,6 +13,11 @@ from msuite_core.constants import IG_CONSENT_POST_TYPE_DEFAULT, IG_CONSENT_POST_
 from msuite_automation.msuite_automation.constants import IG_CONSENT_DEFAULT_EXPIRY_DAYS
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
+	CANCEL_EVENT_METHODS,
+	DELETE_EVENT_METHODS,
+	DOCSTATUS_CANCELLED,
+	DOCSTATUS_SUBMITTED,
+	DOCUMENT_EVENT,
 	IF_ELSE,
 	PREVIEW_ERROR_MAX,
 	SEND_EMAIL,
@@ -20,6 +25,8 @@ from msuite_automation.msuite_automation.constants import (
 	SEND_IG_PUBLIC_REPLY,
 	SEND_SMS,
 	SEND_WHATSAPP,
+	SCHEDULE,
+	SUBMIT_EVENT_METHODS,
 	SWITCH,
 	UPDATE_FIELD,
 	WAIT,
@@ -46,7 +53,7 @@ def _dry_run(automation, doc, trigger_id):
 	trigger = trigger_row(automation, trigger_id, doc.get("doctype"))
 	ref = doc.get("name")
 	out = {"trigger_id": trigger.trigger_id if trigger else trigger_id,
-		"trigger": _trigger_check(trigger, doc),
+		"trigger": _trigger_check(trigger, doc, automation),
 		"filters": _filters(automation, trigger, doc),
 		"already_ran": bool(automation.name and ref) and _already_ran(automation.name, automation.send_frequency, doc.get("doctype"), ref),
 		"steps": [], "paths": []}
@@ -100,12 +107,13 @@ def _dry_run(automation, doc, trigger_id):
 	return out
 
 
-def _trigger_check(trigger, doc) -> dict:
+def _trigger_check(trigger, doc, automation=None) -> dict:
 	"""Check if the trigger would fire for the document in dry-run preview.
 
 	Args:
 		trigger: The Automation Trigger row/dict.
 		doc: The target document or dict.
+		automation: The automation; needed to evaluate Schedule filters.
 
 	Returns:
 		dict: {"matches": bool | None, "reason": str}
@@ -150,10 +158,54 @@ def _trigger_check(trigger, doc) -> dict:
 			return {"matches": True, "reason": f"Date field '{date_field}' ({val_day}) matches target date ({target_day})"}
 		return {"matches": False, "reason": f"Date field '{date_field}' ({val_day}) does not match target date ({target_day})"}
 
-	if tt in ("Document Event", "Schedule"):
-		return {"matches": None, "reason": "not evaluated"}
+	if tt == DOCUMENT_EVENT:
+		return _document_event_check(trigger, doc)
+
+	if tt == SCHEDULE:
+		freq = trigger.schedule_frequency
+		try:
+			passes = _passes(automation, trigger, doc)
+		except Exception:
+			passes = False
+		if passes:
+			return {"matches": True, "reason": f"{freq} schedule: record passes the trigger filters"}
+		return {"matches": False, "reason": f"{freq} schedule: record does not pass the trigger filters"}
 
 	return {"matches": None, "reason": "not evaluated"}
+
+
+def _document_event_check(trigger, doc) -> dict:
+	"""Whether the record's current state would fire this Document Event trigger.
+
+	Args:
+		trigger: Automation Trigger row with `doc_event` (a TRIGGER_EVENT_MAP label).
+		doc: The target document or dict; a missing docstatus counts as 0 (draft).
+
+	Returns:
+		dict: {"matches": bool | None, "reason": str}; None for delete events.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	from frappe.core.doctype.server_script.server_script_utils import EVENT_MAP
+	from msuite_automation.msuite_automation.engine.triggers import TRIGGER_EVENT_MAP
+
+	def labels(methods):
+		# on_trash is "Before Delete" in EVENT_MAP but "On Trash" in TRIGGER_EVENT_MAP; accept both.
+		return {m_map[m] for m in methods for m_map in (EVENT_MAP, TRIGGER_EVENT_MAP)}
+
+	event = trigger.doc_event
+	docstatus = int(doc.get("docstatus") or 0)
+	if event in labels(DELETE_EVENT_METHODS):
+		return {"matches": None, "reason": "fires when the record is deleted"}
+	for methods, needed in ((SUBMIT_EVENT_METHODS, DOCSTATUS_SUBMITTED), (CANCEL_EVENT_METHODS, DOCSTATUS_CANCELLED)):
+		if event in labels(methods):
+			ok = docstatus == needed
+			return {"matches": ok, "reason": f"'{event}' needs docstatus {needed}; record has {docstatus}"}
+	return {"matches": True, "reason": f"'{event}' fires on any saved record"}
 
 
 def _filters(automation, trigger, doc) -> dict:

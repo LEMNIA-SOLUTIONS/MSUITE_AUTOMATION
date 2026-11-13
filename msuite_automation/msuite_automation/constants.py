@@ -51,6 +51,12 @@ DOCUMENT_EVENT = "Document Event"
 FIELD_CHANGE = "Field Change"
 DATE_BASED = "Date Based"
 SCHEDULE = "Schedule"
+# Frappe doc-event method names (keys of engine.triggers.TRIGGER_EVENT_MAP) that need a given docstatus / fire on delete.
+SUBMIT_EVENT_METHODS = ("before_submit", "on_submit")
+CANCEL_EVENT_METHODS = ("before_cancel", "on_cancel")
+DELETE_EVENT_METHODS = ("on_trash", "after_delete")
+DOCSTATUS_SUBMITTED = 1
+DOCSTATUS_CANCELLED = 2
 TRIGGER_TYPES = (DOCUMENT_EVENT, FIELD_CHANGE, DATE_BASED, SCHEDULE)
 
 SEND_WHATSAPP = "Send WhatsApp"
