@@ -163,21 +163,20 @@ class TestHasMarketingConsent(unittest.TestCase):
 	def test_handle_opted_in_by_bsuid(self):
 		self.assertTrue(self._check([("Channel Handle", "bsuid")], phone="IN.1234567890"))
 
-	def test_contact_consent_recorded(self):
-		self.assertTrue(self._check([("Contact", "phone_e164")]))
-		self.assertTrue(self._check([("Contact", "mobile_no")]))
-		self.assertTrue(self._check([("Contact", "phone")]))
+	def test_contact_only_consent_does_not_count(self):
+		"""Contact.consent_updated_at is set by SMS/Email events too, so a Contact never proves WhatsApp opt-in."""
+		for field in ("phone_e164", "mobile_no", "phone"):
+			self.assertFalse(self._check([("Contact", field)]))
 
-	def test_contact_filter_requires_subscribed_and_consent_date(self):
-		seen = []
-		with patch.object(automation_channel, "is_opted_out", return_value=False), \
-		     patch("frappe.db.exists", side_effect=lambda dt, f=None, *a, **k: seen.append((dt, f)) or False):
-			automation_channel.has_marketing_consent(PHONE)
-		contact_filters = [f for dt, f in seen if dt == "Contact"]
-		self.assertTrue(contact_filters)
-		for f in contact_filters:
-			self.assertEqual(f["unsubscribed_whatsapp"], 0)
-			self.assertEqual(f["consent_updated_at"], ["is", "set"])
+	def test_sms_stop_contact_is_not_whatsapp_consent(self):
+		"""An SMS STOP creates a Contact with unsubscribed_whatsapp=0 and consent_updated_at set; WhatsApp stays unconsented."""
+		looked_up = []
+		def exists(doctype, filters=None, *a, **kw):
+			looked_up.append(doctype)
+			return doctype == "Contact"  # the SMS-STOP Contact exists and matches
+		with patch.object(automation_channel, "is_opted_out", return_value=False), patch("frappe.db.exists", side_effect=exists):
+			self.assertFalse(automation_channel.has_marketing_consent(PHONE))
+		self.assertNotIn("Contact", looked_up)
 
 	def test_bsuid_is_not_digit_stripped(self):
 		"""A BSUID must only match itself, never another person's phone handle (IN.919876543210 vs +919876543210)."""
@@ -185,6 +184,7 @@ class TestHasMarketingConsent(unittest.TestCase):
 		with patch.object(automation_channel, "is_opted_out", return_value=False), \
 		     patch("frappe.db.exists", side_effect=lambda dt, f=None, *a, **k: seen.append(f) or False):
 			automation_channel.has_marketing_consent("IN.919876543210")
+		self.assertTrue(seen)
 		for f in seen:
 			vals = [v for k, v in f.items() if isinstance(v, list) and v and v[0] == "in"]
 			for v in vals:
@@ -192,3 +192,4 @@ class TestHasMarketingConsent(unittest.TestCase):
 
 	def test_opt_out_wins(self):
 		self.assertFalse(self._check([("Channel Handle", "platform_handle")], opted_out=True))
+

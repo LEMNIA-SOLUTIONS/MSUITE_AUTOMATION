@@ -11,6 +11,8 @@ SCHEDULER_EVENT = "Scheduler Event"
 LEAD_STATUS_EVENT = "Lead Status Event"
 # Set on a record an automation step saves, so that save never starts other automations (no loops).
 AUTOMATION_WRITE_FLAG = "from_messaging_automation_step"
+# Doc flag: skip the unmapped-variable check on a draft save (pausing or duplicating must not be blocked by a template that changed in Meta).
+SKIP_MAPPING_CHECK_FLAG = "skip_mapping_check"
 # Scheduler/date-based runs execute as this user; Update Field saves then run as the automation's owner instead.
 SYSTEM_USER = "Administrator"
 OWNER_NO_WRITE_MESSAGE = "The automation owner {0} has no permission to update this record."
@@ -82,6 +84,7 @@ ACTION_TYPES = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS, UPDATE_FIELD, ADD_TO_LIST, 
 
 RESULT_SENT = "sent"
 MARKETING_CATEGORY = "MARKETING"
+WHATSAPP_SETTINGS_DOCTYPE = "WhatsApp Settings"
 REQUIRE_OPT_IN_FIELD = "require_marketing_opt_in"  # WhatsApp Settings Check field
 RESULT_SKIPPED_PREFIX = "skipped: "
 RESULT_SKIPPED_DUPLICATE = "skipped: duplicate"

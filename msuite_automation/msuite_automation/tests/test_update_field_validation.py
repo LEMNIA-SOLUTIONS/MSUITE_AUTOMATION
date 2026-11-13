@@ -60,13 +60,33 @@ class TestUpdateFieldFollowsRecordRules(IntegrationTestCase):
 			get_map.assert_called()
 
 
-OWNER = "perm-system-manager@example.com"  # real enabled user in the dev DB
+OWNER = "aut103-owner@example.com"  # created in setUpClass, deleted in tearDownClass
+OWNER_ROLES = ("System Manager", "Sales User", "Sales Manager")  # roles that exist on the site are assigned
 REJECT = frappe.ValidationError("Transition 'New' → 'Follow-up Required' is not a valid Lead pipeline move.")
 
 
 class TestUpdateFieldRunsAsAutomationOwner(IntegrationTestCase):
 	"""AUT-103 D3: a scheduler run (session Administrator) saves as the automation owner, so rules that skip
 	Administrator (the Lead pipeline) still apply."""
+
+	@classmethod
+	def setUpClass(cls):
+		"""Create the enabled non-admin automation owner (committed: each test rolls back)."""
+		super().setUpClass()
+		if frappe.db.exists("User", OWNER):
+			frappe.delete_doc("User", OWNER, force=True, ignore_permissions=True)
+		frappe.get_doc({
+			"doctype": "User", "email": OWNER, "first_name": "Aut103 Owner", "enabled": 1, "send_welcome_email": 0,
+			"roles": [{"role": r} for r in OWNER_ROLES if frappe.db.exists("Role", r)],
+		}).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		"""Remove the owner user created in setUpClass."""
+		frappe.delete_doc("User", OWNER, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		super().tearDownClass()
 
 	def setUp(self):
 		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "ZZ aut103 owner", "status": "Open"}).insert(ignore_permissions=True)

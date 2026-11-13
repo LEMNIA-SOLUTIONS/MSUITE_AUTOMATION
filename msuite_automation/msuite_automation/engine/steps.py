@@ -41,6 +41,7 @@ from msuite_automation.msuite_automation.constants import (
 	ONCE_PER_DOCUMENT,
 	REASON_SEND_FAILED,
 	REQUIRE_OPT_IN_FIELD,
+	WHATSAPP_SETTINGS_DOCTYPE,
 	RESULT_SENT,
 	RESULT_SKIPPED_DUPLICATE,
 	RESULT_SKIPPED_IG_LOGIN,
@@ -257,9 +258,9 @@ def _lacks_marketing_consent(ctx, step) -> bool:
 	phone = _marketing_recipient_phone(ctx, step)
 	if not phone:
 		return False
-	# Field missing from the meta means "not migrated yet": default on. After migrate the
-	# patch writes 1, so a stored 0 is always an explicit admin choice.
-	if frappe.get_meta("WhatsApp Settings").has_field(REQUIRE_OPT_IN_FIELD) and not frappe.db.get_single_value("WhatsApp Settings", REQUIRE_OPT_IN_FIELD):
+	# Field missing from the meta means "not migrated yet": default on. The migrate patch and
+	# the after_install hook write 1, so a stored 0 is an explicit admin choice.
+	if frappe.get_meta(WHATSAPP_SETTINGS_DOCTYPE).has_field(REQUIRE_OPT_IN_FIELD) and not frappe.db.get_single_value(WHATSAPP_SETTINGS_DOCTYPE, REQUIRE_OPT_IN_FIELD):
 		return False
 	phone_e164 = phone_validator.normalize(phone).get("e164") or phone
 	return not channels.whatsapp_has_consent(phone_e164)

@@ -252,7 +252,7 @@ class TestControllerValidation(unittest.TestCase):
 		frappe.db.rollback()
 
 	def test_draft_with_unmapped_variables_is_blocked(self):
-		"""AUT-101: unmapped WhatsApp variables block saving a draft; mapped (source or fallback) drafts save and activate."""
+		"""AUT-101: unmapped WhatsApp variables block saving a draft; mapped (source or fallback) drafts save."""
 		from unittest.mock import patch
 
 		orig = frappe.db.get_value
@@ -282,7 +282,7 @@ class TestControllerValidation(unittest.TestCase):
 			])
 			draft.insert(ignore_permissions=True, ignore_links=True)
 
-			# Activation still runs its own gates (mapping no longer among them)
+			# Dropping the mappings again is rejected by the same mapping check (this is not an activation case)
 			draft.disabled = 0
 			draft.variable_mappings = []
 			with self.assertRaisesRegex(frappe.ValidationError, r"map \{\{1\}\}"):
