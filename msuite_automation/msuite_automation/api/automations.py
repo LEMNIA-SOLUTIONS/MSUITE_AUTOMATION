@@ -20,7 +20,7 @@ from msuite_automation.msuite_automation.constants import (
 from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_automation.msuite_automation.constants import (
 	DATE_BASED, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, RUN_DOCTYPE, RUN_ERROR_MAX, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, SCHEDULE,
-	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
+	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
 )
 from msuite_automation.msuite_automation.engine import preview
 from msuite_core.services.permissions.checks import check_delete, check_read, check_write
@@ -177,6 +177,8 @@ def toggle_automation(name: str, enabled) -> dict:
 	check_write(DOCTYPE)
 	doc = frappe.get_doc(DOCTYPE, name)
 	doc.disabled = 0 if frappe.utils.cint(enabled) else 1
+	if doc.disabled:  # pausing must work even if the template gained variables in Meta
+		doc.flags[SKIP_MAPPING_CHECK_FLAG] = True
 	doc.save()
 	return {"name": name, "disabled": doc.disabled}
 
@@ -188,6 +190,7 @@ def duplicate_automation(name: str) -> dict:
 	copy = frappe.copy_doc(src)
 	copy.title = f"{src.title} (copy)"
 	copy.disabled = 1
+	copy.flags[SKIP_MAPPING_CHECK_FLAG] = True
 	copy.flags.ignore_permlevel_for_fields = ["condition"]
 	for t in copy.triggers:
 		t.flags.ignore_permlevel_for_fields = ["condition"]

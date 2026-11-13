@@ -21,6 +21,7 @@ from msuite_automation.msuite_automation.constants import (
 	IF_ELSE,
 	OFFSET_DAYS_MAX,
 	OFFSET_DAYS_MIN,
+	SKIP_MAPPING_CHECK_FLAG,
 	SCHEDULE,
 	SEND_EMAIL,
 	SEND_SMS,
@@ -58,8 +59,13 @@ class MessagingAutomation(Document):
 		if errors:
 			frappe.throw("<br>".join(errors), title=_("Automation is not valid"))
 		self._validate_fields_exist()
+		# Unmapped template variables block every save (draft too), matching the builder's draft checklist.
+		# Only drafts may skip it (pause / duplicate); an enabled automation always passes the check.
+		errors = [] if (self.flags.get(SKIP_MAPPING_CHECK_FLAG) and self.disabled) else self._mapping_issues()
+		if errors:
+			frappe.throw("<br>".join(errors), title=_("Automation is not valid"))
 		if not self.disabled:
-			errors = validate_activation(self.triggers, self.steps, self.edges) + self._mapping_issues() + self._number_issues() + self._header_issues() + self._schedule_issues()
+			errors = validate_activation(self.triggers, self.steps, self.edges) + self._number_issues() + self._header_issues() + self._schedule_issues()
 			if errors:
 				frappe.throw("<br>".join(errors), title=_("Automation can't be activated"))
 		for warning in validate_warnings(self.triggers, self.steps, self.edges):

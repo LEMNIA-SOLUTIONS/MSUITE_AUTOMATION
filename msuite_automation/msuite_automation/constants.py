@@ -11,6 +11,12 @@ SCHEDULER_EVENT = "Scheduler Event"
 LEAD_STATUS_EVENT = "Lead Status Event"
 # Set on a record an automation step saves, so that save never starts other automations (no loops).
 AUTOMATION_WRITE_FLAG = "from_messaging_automation_step"
+# Doc flag: skip the unmapped-variable check on a draft save (pausing or duplicating must not be blocked by a template that changed in Meta).
+SKIP_MAPPING_CHECK_FLAG = "skip_mapping_check"
+# Scheduler/date-based runs execute as this user; Update Field saves then run as the automation's owner instead.
+SYSTEM_USER = "Administrator"
+OWNER_NO_WRITE_MESSAGE = "The automation owner {0} has no permission to update this record."
+OWNER_UNUSABLE_MESSAGE = "Cannot run Update Field as the automation owner {0}: the user is missing or disabled."
 ORDER_WORKFLOW_EVENT = "Order Workflow Event"
 NOTIFICATION_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT)
 ALL_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT, LEAD_STATUS_EVENT, ORDER_WORKFLOW_EVENT)
@@ -51,6 +57,14 @@ DOCUMENT_EVENT = "Document Event"
 FIELD_CHANGE = "Field Change"
 DATE_BASED = "Date Based"
 SCHEDULE = "Schedule"
+# Frappe doc-event method names (keys of engine.triggers.TRIGGER_EVENT_MAP) that need a given docstatus / fire on delete.
+SUBMIT_EVENT_METHODS = ("before_submit", "on_submit")
+CANCEL_EVENT_METHODS = ("before_cancel", "on_cancel")
+DELETE_EVENT_METHODS = ("on_trash", "after_delete")
+SUBMITTED_SAVE_EVENT_METHODS = ("before_update_after_submit", "on_update_after_submit")  # only fire on a submitted doc
+ANY_SAVE_EVENT_METHODS = ("before_insert", "after_insert", "before_validate", "validate", "on_update")
+DOCSTATUS_SUBMITTED = 1
+DOCSTATUS_CANCELLED = 2
 TRIGGER_TYPES = (DOCUMENT_EVENT, FIELD_CHANGE, DATE_BASED, SCHEDULE)
 
 SEND_WHATSAPP = "Send WhatsApp"
@@ -69,6 +83,9 @@ SEND_STEPS = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS)
 ACTION_TYPES = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS, UPDATE_FIELD, ADD_TO_LIST, SEND_IG_PUBLIC_REPLY, SEND_IG_CONSENT_TEMPLATE)
 
 RESULT_SENT = "sent"
+MARKETING_CATEGORY = "MARKETING"
+WHATSAPP_SETTINGS_DOCTYPE = "WhatsApp Settings"
+REQUIRE_OPT_IN_FIELD = "require_marketing_opt_in"  # WhatsApp Settings Check field
 RESULT_SKIPPED_PREFIX = "skipped: "
 RESULT_SKIPPED_DUPLICATE = "skipped: duplicate"
 RESULT_SKIPPED_UNSUPPORTED_TYPE = "skipped: not a supported mention type"
@@ -76,6 +93,8 @@ RESULT_SKIPPED_IG_LOGIN = "skipped: instagram login account"
 RESULT_SKIPPED_REPLY_REFUSED = "skipped: reply refused"
 RESULT_SKIPPED_MENTION_UNRESOLVED = "skipped: mention not resolved"
 RESULT_SKIPPED_NO_AUTHOR = "skipped: mention author unknown"
+RESULT_SKIPPED_OPTED_OUT = "skipped: opted out"
+RESULT_SKIPPED_NO_CONSENT = "skipped: no consent"
 RESULT_SKIPPED_NO_CONSENT_RECORD = "skipped: no consent record"
 RESULT_SKIPPED_TEMPLATES_DISABLED = "skipped: templates disabled"
 REASON_SEND_FAILED = "send failed"

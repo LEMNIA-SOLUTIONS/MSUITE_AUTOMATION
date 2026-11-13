@@ -80,20 +80,53 @@ class TestDryRun(unittest.TestCase):
 		out_mismatch = preview.dry_run(auto_date, todo(date=today))
 		self.assertFalse(out_mismatch["trigger"]["matches"])
 
-	def test_trigger_check_doc_event_and_schedule(self):
-		auto_event = automation(triggers=[{
-			"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "ToDo", "doc_event": "After Save",
-		}])
-		out_event = preview.dry_run(auto_event, todo())
-		self.assertIsNone(out_event["trigger"]["matches"])
-		self.assertEqual(out_event["trigger"]["reason"], "not evaluated")
+	def _event_check(self, event, **doc_kw):
+		trig = {"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "ToDo", "doc_event": event}
+		return preview.dry_run(automation(triggers=[trig]), todo(**doc_kw))["trigger"]
 
-		auto_sched = automation(triggers=[{
-			"trigger_id": "t1", "trigger_type": "Schedule", "reference_doctype": "ToDo", "schedule_frequency": "Daily",
-		}])
-		out_sched = preview.dry_run(auto_sched, todo())
-		self.assertIsNone(out_sched["trigger"]["matches"])
-		self.assertEqual(out_sched["trigger"]["reason"], "not evaluated")
+	def test_trigger_check_doc_event(self):
+		for event in ("After Insert", "After Save", "Before Save"):
+			self.assertTrue(self._event_check(event, docstatus=0)["matches"], event)
+		for event in ("Before Submit", "After Submit"):
+			self.assertTrue(self._event_check(event, docstatus=1)["matches"], event)
+			self.assertFalse(self._event_check(event, docstatus=0)["matches"], event)
+		for event in ("Before Cancel", "After Cancel"):
+			self.assertTrue(self._event_check(event, docstatus=2)["matches"], event)
+			self.assertFalse(self._event_check(event, docstatus=1)["matches"], event)
+		for event in ("On Trash", "Before Delete", "After Delete"):
+			out = self._event_check(event, docstatus=0)
+			self.assertIsNone(out["matches"], event)
+			self.assertEqual(out["reason"], "fires when the record is deleted")
+
+	def test_trigger_check_doc_event_submitted_and_unknown(self):
+		for event in ("Before Save (Submitted Document)", "After Save (Submitted Document)"):
+			self.assertTrue(self._event_check(event, docstatus=1)["matches"], event)
+			self.assertFalse(self._event_check(event, docstatus=0)["matches"], event)
+		for event in ("Before Print", "On Payment Paid", "Not An Event"):
+			out = self._event_check(event, docstatus=0)
+			self.assertIsNone(out["matches"], event)
+			self.assertIn("cannot be checked", out["reason"])
+
+	def test_trigger_check_schedule_filter_error(self):
+		trig = frappe._dict(trigger_type="Schedule", schedule_frequency="Daily")
+		with patch.object(preview, "_passes", side_effect=ValueError("boom")):
+			out = preview._trigger_check(trig, todo(), automation())
+		self.assertFalse(out["matches"])
+		self.assertEqual(out["reason"], "Daily schedule: filter check failed: boom")
+
+	def test_trigger_check_doc_event_missing_docstatus(self):
+		self.assertTrue(self._event_check("After Save")["matches"])
+		self.assertFalse(self._event_check("After Submit")["matches"])
+		self.assertFalse(self._event_check("After Cancel")["matches"])
+
+	def test_trigger_check_schedule(self):
+		trig = {"trigger_id": "t1", "trigger_type": "Schedule", "reference_doctype": "ToDo", "schedule_frequency": "Daily"}
+		ok = preview.dry_run(automation(triggers=[trig]), todo())["trigger"]
+		self.assertTrue(ok["matches"])
+		self.assertIn("Daily", ok["reason"])
+		bad = preview.dry_run(automation(triggers=[trig]), todo(status="Closed"))["trigger"]
+		self.assertFalse(bad["matches"])
+		self.assertIn("Daily", bad["reason"])
 
 	@patch(f"{CH}.send_to_phone")
 	@patch(f"{CH}.frappe.sendmail")

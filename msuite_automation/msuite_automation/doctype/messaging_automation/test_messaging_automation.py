@@ -251,8 +251,8 @@ class TestControllerValidation(unittest.TestCase):
 		d_opt_blank.insert(ignore_permissions=True)
 		frappe.db.rollback()
 
-	def test_paused_draft_with_unmapped_variables_saves_and_activation_blocked(self):
-		"""Paused draft with unmapped WhatsApp variables saves, activation attempt is blocked."""
+	def test_draft_with_unmapped_variables_is_blocked(self):
+		"""AUT-101: unmapped WhatsApp variables block saving a draft; mapped (source or fallback) drafts save."""
 		from unittest.mock import patch
 
 		orig = frappe.db.get_value
@@ -262,18 +262,29 @@ class TestControllerValidation(unittest.TestCase):
 				return frappe._dict(template="Hello {{1}} and {{2}}")
 			return orig(*args, **kwargs)
 
-		with patch("frappe.db.get_value", side_effect=fake_get_value):
-			# Paused draft (disabled=1): saves with unmapped variables
-			draft = self._doc(
+		def make(mappings):
+			return self._doc(
 				disabled=1,
 				steps=[{"step_id": "w1", "step_type": "Send WhatsApp", "template": "tpl_x"}],
 				edges=[{"source_id": "t1", "target_id": "w1"}],
-				variable_mappings=[],
+				variable_mappings=mappings,
 			)
+
+		with patch("frappe.db.get_value", side_effect=fake_get_value):
+			with self.assertRaisesRegex(frappe.ValidationError, r"map \{\{1\}\}"):
+				make([]).insert(ignore_permissions=True, ignore_links=True)
+			with self.assertRaisesRegex(frappe.ValidationError, r"map \{\{2\}\}"):
+				make([{"step_id": "w1", "variable_key": "1", "source_field": "description"}]).insert(ignore_permissions=True, ignore_links=True)
+
+			draft = make([
+				{"step_id": "w1", "variable_key": "1", "source_field": "description"},
+				{"step_id": "w1", "variable_key": "2", "static_fallback": "x"},
+			])
 			draft.insert(ignore_permissions=True, ignore_links=True)
 
-			# Attempting to activate (disabled=0): blocked
+			# Dropping the mappings again is rejected by the same mapping check (this is not an activation case)
 			draft.disabled = 0
+			draft.variable_mappings = []
 			with self.assertRaisesRegex(frappe.ValidationError, r"map \{\{1\}\}"):
 				draft.save(ignore_permissions=True)
 
