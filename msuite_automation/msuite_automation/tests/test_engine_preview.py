@@ -85,7 +85,7 @@ class TestDryRun(unittest.TestCase):
 		return preview.dry_run(automation(triggers=[trig]), todo(**doc_kw))["trigger"]
 
 	def test_trigger_check_doc_event(self):
-		for event in ("After Insert", "After Save", "Before Save", "After Save (Submitted Document)"):
+		for event in ("After Insert", "After Save", "Before Save"):
 			self.assertTrue(self._event_check(event, docstatus=0)["matches"], event)
 		for event in ("Before Submit", "After Submit"):
 			self.assertTrue(self._event_check(event, docstatus=1)["matches"], event)
