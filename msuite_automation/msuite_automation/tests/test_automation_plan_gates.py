@@ -49,6 +49,7 @@ class TestAutomationPlanGates(IntegrationTestCase):
 				doc.doctype = "Messaging Automation Run"
 				doc.name = "RUN-001"
 				doc.flags.ignore_plan_gate = False
+				doc.flags.is_retry = False
 				doc.is_new.return_value = True
 
 				with self.assertRaises(frappe.ValidationError) as ctx:
@@ -69,6 +70,7 @@ class TestAutomationPlanGates(IntegrationTestCase):
 				doc.doctype = "Messaging Automation Run"
 				doc.name = "RUN-001"
 				doc.flags.ignore_plan_gate = False
+				doc.flags.is_retry = False
 				doc.is_new.return_value = True
 
 				enforce_gate(doc, "before_insert")
@@ -99,6 +101,7 @@ class TestAutomationPlanGates(IntegrationTestCase):
 				doc.name = "MA-NEW"
 				doc.disabled = 0
 				doc.flags.ignore_plan_gate = False
+				doc.flags.is_retry = False
 				doc.is_new.return_value = True
 
 				with self.assertRaises(frappe.ValidationError) as ctx:
@@ -123,6 +126,7 @@ class TestAutomationPlanGates(IntegrationTestCase):
 				doc.name = "MA-DISABLED"
 				doc.disabled = 1
 				doc.flags.ignore_plan_gate = False
+				doc.flags.is_retry = False
 				doc.is_new.return_value = True
 
 				# Must not raise

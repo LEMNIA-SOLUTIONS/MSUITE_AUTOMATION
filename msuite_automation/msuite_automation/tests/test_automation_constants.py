@@ -155,6 +155,8 @@ class TestExecutorLimits(unittest.TestCase):
 			run.flags.ignore_links = True
 			run.insert(ignore_permissions=True)
 			frappe.db.sql(f"update `tab{RUN_DOCTYPE}` set modified=%s where name=%s", (past, run.name))
+		# The sweeper is global: stuck runs left by other tests count toward the batch, so assert on the table total.
+		failed_before = frappe.db.count(RUN_DOCTYPE, {"status": "Failed"})
 		with patch.object(executor, "STUCK_SWEEP_BATCH", 1):
 			executor.sweep_stuck_runs()
-		self.assertEqual(frappe.db.count(RUN_DOCTYPE, {"automation": name, "status": "Failed"}), 1)
+		self.assertEqual(frappe.db.count(RUN_DOCTYPE, {"status": "Failed"}) - failed_before, 1)
