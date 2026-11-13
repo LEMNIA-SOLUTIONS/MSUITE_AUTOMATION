@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 
@@ -31,6 +32,8 @@ from msuite_inbox.inbox.services.mentions import graph
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
 	AUTOMATION_WRITE_FLAG,
+	OWNER_UNUSABLE_MESSAGE,
+	SYSTEM_USER,
 	CONTEXT_MENTION_REPLY,
 	MARKETING_CATEGORY,
 	ONCE_PER_DAY,
@@ -142,15 +145,45 @@ def update_value(doc, step):
 	return value
 
 
-def _save_field(doc, field, value) -> None:
+@contextlib.contextmanager
+def _run_as_owner(owner):
+	"""Run the block as the automation owner when the session is Administrator (scheduler / date-based runs),
+	because some rules (the Lead pipeline) skip Administrator. No switch when there is no owner, the owner is
+	Administrator, or the session is already a normal user.
+
+	Args:
+		owner: the Messaging Automation's owner (user id) or None.
+
+	Raises:
+		frappe.ValidationError: owner is missing or disabled (never falls back to Administrator).
+
+	Side Effects:
+		frappe.set_user; the previous user is restored in finally, also when the block raises.
+	"""
+	if not owner or owner == SYSTEM_USER or frappe.session.user != SYSTEM_USER:
+		yield
+		return
+	if not frappe.db.get_value("User", owner, "enabled"):
+		frappe.throw(OWNER_UNUSABLE_MESSAGE.format(owner))
+	previous = frappe.session.user
+	frappe.set_user(owner)
+	try:
+		yield
+	finally:
+		frappe.set_user(previous)
+
+
+def _save_field(doc, field, value, owner=None) -> None:
 	"""Save one field with doc.save(), so every rule of the record applies as for a manual edit: mandatory
 	fields, permissions and other apps' validations (e.g. the Lead pipeline). Raises when a rule rejects the
 	value; the step then fails with that message and the record keeps its old value. The flag stops this
-	save from starting other automations."""
-	record = frappe.get_doc(doc.doctype, doc.name)
-	record.set(field, value)
-	record.flags[AUTOMATION_WRITE_FLAG] = True
-	record.save()
+	save from starting other automations. `owner`: see _run_as_owner (the save runs as that user when the
+	session is Administrator)."""
+	with _run_as_owner(owner):
+		record = frappe.get_doc(doc.doctype, doc.name)
+		record.set(field, value)
+		record.flags[AUTOMATION_WRITE_FLAG] = True
+		record.save()
 
 
 def set_in_memory(doc, field, value):
@@ -498,7 +531,7 @@ def execute(ctx, step) -> str:
 		return _send(ctx, step, "sms", lambda: channels.send_sms(a, step, doc))
 	if step.step_type == UPDATE_FIELD:
 		value = update_value(doc, step)
-		_save_field(doc, step.update_field, value)
+		_save_field(doc, step.update_field, value, getattr(a, "owner", None))
 		set_in_memory(doc, step.update_field, value)
 		return "updated"
 	if step.step_type == ADD_TO_LIST:

@@ -11,6 +11,9 @@ SCHEDULER_EVENT = "Scheduler Event"
 LEAD_STATUS_EVENT = "Lead Status Event"
 # Set on a record an automation step saves, so that save never starts other automations (no loops).
 AUTOMATION_WRITE_FLAG = "from_messaging_automation_step"
+# Scheduler/date-based runs execute as this user; Update Field saves then run as the automation's owner instead.
+SYSTEM_USER = "Administrator"
+OWNER_UNUSABLE_MESSAGE = "Cannot run Update Field as the automation owner {0}: the user is missing or disabled."
 ORDER_WORKFLOW_EVENT = "Order Workflow Event"
 NOTIFICATION_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT)
 ALL_TYPES = (DOCTYPE_EVENT, SCHEDULER_EVENT, LEAD_STATUS_EVENT, ORDER_WORKFLOW_EVENT)

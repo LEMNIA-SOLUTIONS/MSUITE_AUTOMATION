@@ -4,9 +4,10 @@ starts other automations. Runs against the local test DB; no live calls."""
 from unittest.mock import patch
 
 import frappe
+from frappe.desk.doctype.todo.todo import ToDo
 from frappe.tests import IntegrationTestCase
 
-from msuite_automation.msuite_automation.constants import AUTOMATION_WRITE_FLAG
+from msuite_automation.msuite_automation.constants import AUTOMATION_WRITE_FLAG, SYSTEM_USER
 from msuite_automation.msuite_automation.engine import steps, triggers
 
 
@@ -57,6 +58,97 @@ class TestUpdateFieldFollowsRecordRules(IntegrationTestCase):
 		with patch.object(triggers, "get_map", return_value={}) as get_map, patch.object(triggers, "get_watch_map", return_value={}):
 			triggers.on_doc_event(doc, "on_update")
 			get_map.assert_called()
+
+
+OWNER = "perm-system-manager@example.com"  # real enabled user in the dev DB
+REJECT = frappe.ValidationError("Transition 'New' → 'Follow-up Required' is not a valid Lead pipeline move.")
+
+
+class TestUpdateFieldRunsAsAutomationOwner(IntegrationTestCase):
+	"""AUT-103 D3: a scheduler run (session Administrator) saves as the automation owner, so rules that skip
+	Administrator (the Lead pipeline) still apply."""
+
+	def setUp(self):
+		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "ZZ aut103 owner", "status": "Open"}).insert(ignore_permissions=True)
+		self.prev_user = frappe.session.user
+		frappe.set_user(SYSTEM_USER)
+
+	def tearDown(self):
+		frappe.set_user(self.prev_user)
+		frappe.db.rollback()
+
+	def _ctx(self, owner):
+		return frappe._dict(automation=frappe._dict(name="MA-X", send_frequency="Every time", owner=owner), doc=self.todo)
+
+	def _run(self, owner, side_effect=None):
+		seen = []
+
+		original = ToDo.validate
+
+		def validate(doc, *_a, **_k):
+			seen.append(frappe.session.user)
+			if side_effect:
+				raise side_effect
+			original(doc)  # keep ToDo's own validate (sets _assignment)
+
+		with patch.object(ToDo, "validate", validate):
+			try:
+				return seen, steps.execute(self._ctx(owner), _step())
+			finally:
+				self.seen = seen
+
+	def test_saves_as_owner_and_restores_the_session_user(self):
+		seen, result = self._run(OWNER)
+		self.assertEqual(result, "updated")
+		self.assertEqual(seen, [OWNER])
+		self.assertEqual(frappe.session.user, SYSTEM_USER)
+
+	def test_a_rejected_move_fails_the_step_and_restores_the_session_user(self):
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._run(OWNER, side_effect=REJECT)
+		self.assertIn("not a valid Lead pipeline move", str(cm.exception))
+		self.assertEqual(self.seen, [OWNER])
+		self.assertEqual(frappe.session.user, SYSTEM_USER)
+		self.assertEqual(frappe.db.get_value("ToDo", self.todo.name, "status"), "Open")
+
+	def test_administrator_owned_automation_keeps_the_bypass(self):
+		with patch.object(frappe, "set_user") as set_user:
+			seen, result = self._run(SYSTEM_USER)
+		set_user.assert_not_called()
+		self.assertEqual((seen, result), ([SYSTEM_USER], "updated"))
+
+	def test_missing_owner_does_not_impersonate(self):
+		with patch.object(frappe, "set_user") as set_user:
+			self._run(None)
+		set_user.assert_not_called()
+
+	def test_normal_session_user_is_not_impersonated(self):
+		frappe.set_user(OWNER)
+		with patch.object(frappe, "set_user") as set_user:
+			seen, _ = self._run("someone-else@example.com")
+		set_user.assert_not_called()
+		self.assertEqual(seen, [OWNER])
+
+	def test_unusable_owner_fails_the_step_without_falling_back(self):
+		for owner, enabled in (("ghost-aut103@example.com", None), (OWNER, 0)):
+			with self.subTest(owner=owner), patch("frappe.db.get_value", return_value=enabled):
+				with patch("frappe.desk.doctype.todo.todo.ToDo.validate") as validate:
+					with self.assertRaises(frappe.ValidationError) as cm:
+						steps.execute(self._ctx(owner), _step())
+				validate.assert_not_called()
+				self.assertIn(owner, str(cm.exception))
+				self.assertEqual(frappe.session.user, SYSTEM_USER)
+
+	def test_live_a_real_user_cannot_make_an_invalid_lead_move(self):
+		"""Real CRM Lead from the dev DB (rolled back in tearDown): New -> Follow-up Required is rejected for the owner."""
+		lead = frappe.db.get_value("CRM Lead", {"status": "New"}, "name")
+		if not lead:
+			self.skipTest("no CRM Lead in status New on this site")
+		ctx = frappe._dict(automation=frappe._dict(name="MA-X", send_frequency="Every time", owner=OWNER), doc=frappe._dict(doctype="CRM Lead", name=lead))
+		with self.assertRaises(frappe.ValidationError) as cm:
+			steps.execute(ctx, _step("status", "Follow-up Required"))
+		self.assertIn("not a valid Lead pipeline move", str(cm.exception))
+		self.assertEqual(frappe.session.user, SYSTEM_USER)
 
 
 class TestRunStatusWithUpdateFieldErrors(IntegrationTestCase):
