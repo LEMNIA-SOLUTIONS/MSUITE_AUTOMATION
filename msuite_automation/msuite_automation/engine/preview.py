@@ -8,11 +8,13 @@ import itertools
 import re
 
 import frappe
+from frappe.core.doctype.server_script.server_script_utils import EVENT_MAP
 
 from msuite_core.constants import IG_CONSENT_POST_TYPE_DEFAULT, IG_CONSENT_POST_TYPE_MAP
 from msuite_automation.msuite_automation.constants import IG_CONSENT_DEFAULT_EXPIRY_DAYS
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
+	ANY_SAVE_EVENT_METHODS,
 	CANCEL_EVENT_METHODS,
 	DELETE_EVENT_METHODS,
 	DOCSTATUS_CANCELLED,
@@ -27,6 +29,7 @@ from msuite_automation.msuite_automation.constants import (
 	SEND_WHATSAPP,
 	SCHEDULE,
 	SUBMIT_EVENT_METHODS,
+	SUBMITTED_SAVE_EVENT_METHODS,
 	SWITCH,
 	UPDATE_FIELD,
 	WAIT,
@@ -36,6 +39,7 @@ from msuite_automation.msuite_automation.engine import channels, steps as S
 from msuite_automation.msuite_automation.engine.executor import _already_ran, _passes, effective_automation, switch_handle, trigger_row
 from msuite_automation.msuite_automation.engine.filters import field_value, rule_ok
 from msuite_automation.msuite_automation.engine.graph import Graph
+from msuite_automation.msuite_automation.engine.triggers import TRIGGER_EVENT_MAP
 from msuite_automation.msuite_automation.engine.walker import advance, start_paths
 
 SAVEPOINT = "automation_dry_run"
@@ -107,7 +111,7 @@ def _dry_run(automation, doc, trigger_id):
 	return out
 
 
-def _trigger_check(trigger, doc, automation=None) -> dict:
+def _trigger_check(trigger, doc, automation) -> dict:
 	"""Check if the trigger would fire for the document in dry-run preview.
 
 	Args:
@@ -165,8 +169,8 @@ def _trigger_check(trigger, doc, automation=None) -> dict:
 		freq = trigger.schedule_frequency
 		try:
 			passes = _passes(automation, trigger, doc)
-		except Exception:
-			passes = False
+		except Exception as e:
+			return {"matches": False, "reason": f"{freq} schedule: filter check failed: {str(e)[:PREVIEW_ERROR_MAX]}"}
 		if passes:
 			return {"matches": True, "reason": f"{freq} schedule: record passes the trigger filters"}
 		return {"matches": False, "reason": f"{freq} schedule: record does not pass the trigger filters"}
@@ -190,9 +194,6 @@ def _document_event_check(trigger, doc) -> dict:
 	Side Effects:
 		None.
 	"""
-	from frappe.core.doctype.server_script.server_script_utils import EVENT_MAP
-	from msuite_automation.msuite_automation.engine.triggers import TRIGGER_EVENT_MAP
-
 	def labels(methods):
 		# on_trash is "Before Delete" in EVENT_MAP but "On Trash" in TRIGGER_EVENT_MAP; accept both.
 		return {m_map[m] for m in methods for m_map in (EVENT_MAP, TRIGGER_EVENT_MAP)}
@@ -205,7 +206,12 @@ def _document_event_check(trigger, doc) -> dict:
 		if event in labels(methods):
 			ok = docstatus == needed
 			return {"matches": ok, "reason": f"'{event}' needs docstatus {needed}; record has {docstatus}"}
-	return {"matches": True, "reason": f"'{event}' fires on any saved record"}
+	if event in labels(SUBMITTED_SAVE_EVENT_METHODS):
+		ok = docstatus == DOCSTATUS_SUBMITTED
+		return {"matches": ok, "reason": f"'{event}' needs a submitted record (docstatus {DOCSTATUS_SUBMITTED}); record has {docstatus}"}
+	if event in labels(ANY_SAVE_EVENT_METHODS):
+		return {"matches": True, "reason": f"'{event}' fires on any saved record"}
+	return {"matches": None, "reason": f"'{event}' cannot be checked from the current record"}
 
 
 def _filters(automation, trigger, doc) -> dict:

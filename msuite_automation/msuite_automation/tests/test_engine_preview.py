@@ -98,6 +98,22 @@ class TestDryRun(unittest.TestCase):
 			self.assertIsNone(out["matches"], event)
 			self.assertEqual(out["reason"], "fires when the record is deleted")
 
+	def test_trigger_check_doc_event_submitted_and_unknown(self):
+		for event in ("Before Save (Submitted Document)", "After Save (Submitted Document)"):
+			self.assertTrue(self._event_check(event, docstatus=1)["matches"], event)
+			self.assertFalse(self._event_check(event, docstatus=0)["matches"], event)
+		for event in ("Before Print", "On Payment Paid", "Not An Event"):
+			out = self._event_check(event, docstatus=0)
+			self.assertIsNone(out["matches"], event)
+			self.assertIn("cannot be checked", out["reason"])
+
+	def test_trigger_check_schedule_filter_error(self):
+		trig = frappe._dict(trigger_type="Schedule", schedule_frequency="Daily")
+		with patch.object(preview, "_passes", side_effect=ValueError("boom")):
+			out = preview._trigger_check(trig, todo(), automation())
+		self.assertFalse(out["matches"])
+		self.assertEqual(out["reason"], "Daily schedule: filter check failed: boom")
+
 	def test_trigger_check_doc_event_missing_docstatus(self):
 		self.assertTrue(self._event_check("After Save")["matches"])
 		self.assertFalse(self._event_check("After Submit")["matches"])
