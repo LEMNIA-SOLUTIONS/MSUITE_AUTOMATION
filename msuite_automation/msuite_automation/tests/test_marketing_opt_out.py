@@ -13,6 +13,13 @@ class TestMarketingOptOut(unittest.TestCase):
 	def setUp(self):
 		self.templates_to_cleanup = []
 		self.contacts_to_cleanup = []
+		# These tests cover opt-out only; consent is covered in test_marketing_consent.
+		consent = patch(f"{CH}.whatsapp_has_consent", return_value=True)
+		consent.start()
+		self.addCleanup(consent.stop)
+		setting = patch("frappe.db.get_single_value", return_value=1)
+		setting.start()
+		self.addCleanup(setting.stop)
 
 	def tearDown(self):
 		frappe.db.rollback()

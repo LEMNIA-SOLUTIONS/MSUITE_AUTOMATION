@@ -269,6 +269,8 @@ def _preview(automation, step, doc) -> dict:
 		ctx = frappe._dict(automation=eff, doc=doc)
 		if S._is_marketing_opted_out(ctx, step):
 			return {"skipped": "opted out"}
+		if S._lacks_marketing_consent(ctx, step):
+			return {"skipped": "no consent"}
 		if step.delivery_mode == "Bulk campaign":
 			to = channels.resolve_phone(eff, doc)
 			return {"bulk": True, "to": to} if to else {"skipped": "no recipient"}

@@ -32,15 +32,19 @@ from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
 	AUTOMATION_WRITE_FLAG,
 	CONTEXT_MENTION_REPLY,
+	MARKETING_CATEGORY,
 	ONCE_PER_DAY,
 	ONCE_PER_DOCUMENT,
 	REASON_SEND_FAILED,
+	REQUIRE_OPT_IN_FIELD,
 	RESULT_SENT,
 	RESULT_SKIPPED_DUPLICATE,
 	RESULT_SKIPPED_IG_LOGIN,
 	RESULT_SKIPPED_MENTION_UNRESOLVED,
 	RESULT_SKIPPED_NO_AUTHOR,
+	RESULT_SKIPPED_NO_CONSENT,
 	RESULT_SKIPPED_NO_CONSENT_RECORD,
+	RESULT_SKIPPED_OPTED_OUT,
 	RESULT_SKIPPED_PREFIX,
 	RESULT_SKIPPED_REPLY_REFUSED,
 	RESULT_SKIPPED_TEMPLATES_DISABLED,
@@ -104,7 +108,11 @@ def _send(ctx, step, channel, fn):
 	except channels.RecipientOptedOut:
 		if lock:
 			channels.release_lock(lock)
-		return "skipped: opted out"
+		return RESULT_SKIPPED_OPTED_OUT
+	except channels.RecipientNoConsent:
+		if lock:
+			channels.release_lock(lock)
+		return RESULT_SKIPPED_NO_CONSENT
 	except Exception:
 		if lock:
 			channels.release_lock(lock)
@@ -152,6 +160,70 @@ def set_in_memory(doc, field, value):
 		doc[field] = value
 
 
+def _marketing_recipient_phone(ctx, step):
+	"""Resolve the recipient phone when the step sends a MARKETING WhatsApp template.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, and optional phone.
+		step: Step definition containing step attributes or dict.
+
+	Returns:
+		str | None: The recipient phone, or None when the step is not a MARKETING
+			template send or has no recipient.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	tpl_name = getattr(step, "template", None) or (step.get("template") if isinstance(step, dict) else None)
+	if not tpl_name:
+		return None
+	category = frappe.db.get_value("WhatsApp Templates", tpl_name, "category")
+	if not category and hasattr(step, "category"):
+		category = step.category
+	elif not category and isinstance(step, dict):
+		category = step.get("category")
+	if (category or "").strip().upper() != MARKETING_CATEGORY:
+		return None
+	a, doc = ctx.automation, ctx.doc
+	return (ctx.get("phone") if hasattr(ctx, "get") else None) or channels.resolve_phone(a, doc) or None
+
+
+def _lacks_marketing_consent(ctx, step) -> bool:
+	"""Check if a MARKETING template send lacks a recorded WhatsApp opt-in.
+
+	Only applies when the WhatsApp Settings option `require_marketing_opt_in` is on
+	(a site that has not migrated yet counts as on). Callers check opt-out first, so
+	an opted-out recipient keeps the "opted out" result.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, and optional phone.
+		step: Step definition containing step attributes or dict.
+
+	Returns:
+		bool: True if marketing template, setting on, and no consent is recorded.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	phone = _marketing_recipient_phone(ctx, step)
+	if not phone:
+		return False
+	try:
+		required = frappe.db.get_single_value("WhatsApp Settings", REQUIRE_OPT_IN_FIELD)
+	except frappe.ValidationError:  # field not migrated yet: use its default (on)
+		required = None
+	if required is not None and not int(required):
+		return False
+	phone_e164 = phone_validator.normalize(phone).get("e164") or phone
+	return not channels.whatsapp_has_consent(phone_e164)
+
+
 def _is_marketing_opted_out(ctx, step) -> bool:
 	"""Check if the recipient is opted out of WhatsApp marketing communications.
 
@@ -174,19 +246,7 @@ def _is_marketing_opted_out(ctx, step) -> bool:
 	Side Effects:
 		None.
 	"""
-	tpl_name = getattr(step, "template", None) or (step.get("template") if isinstance(step, dict) else None)
-	if not tpl_name:
-		return False
-	category = frappe.db.get_value("WhatsApp Templates", tpl_name, "category")
-	if not category and hasattr(step, "category"):
-		category = step.category
-	elif not category and isinstance(step, dict):
-		category = step.get("category")
-	if (category or "").strip().upper() != "MARKETING":
-		return False
-
-	a, doc = ctx.automation, ctx.doc
-	phone = (ctx.get("phone") if hasattr(ctx, "get") else None) or channels.resolve_phone(a, doc)
+	phone = _marketing_recipient_phone(ctx, step)
 	if not phone:
 		return False
 
@@ -424,7 +484,9 @@ def execute(ctx, step) -> str:
 		if channels.already_sent(step.template, doc.doctype, doc.name, a.send_frequency, ignore_failed=bool(ctx.get("retrying"))):
 			return "skipped: already sent"
 		if _is_marketing_opted_out(ctx, step):
-			return "skipped: opted out"
+			return RESULT_SKIPPED_OPTED_OUT
+		if _lacks_marketing_consent(ctx, step):
+			return RESULT_SKIPPED_NO_CONSENT
 		if step.delivery_mode == "Bulk campaign":
 			phone = channels.resolve_phone(a, doc)
 			if not phone:

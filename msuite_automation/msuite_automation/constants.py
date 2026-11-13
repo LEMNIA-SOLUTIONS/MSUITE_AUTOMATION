@@ -77,6 +77,8 @@ SEND_STEPS = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS)
 ACTION_TYPES = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS, UPDATE_FIELD, ADD_TO_LIST, SEND_IG_PUBLIC_REPLY, SEND_IG_CONSENT_TEMPLATE)
 
 RESULT_SENT = "sent"
+MARKETING_CATEGORY = "MARKETING"
+REQUIRE_OPT_IN_FIELD = "require_marketing_opt_in"  # WhatsApp Settings Check field
 RESULT_SKIPPED_PREFIX = "skipped: "
 RESULT_SKIPPED_DUPLICATE = "skipped: duplicate"
 RESULT_SKIPPED_UNSUPPORTED_TYPE = "skipped: not a supported mention type"
@@ -84,6 +86,8 @@ RESULT_SKIPPED_IG_LOGIN = "skipped: instagram login account"
 RESULT_SKIPPED_REPLY_REFUSED = "skipped: reply refused"
 RESULT_SKIPPED_MENTION_UNRESOLVED = "skipped: mention not resolved"
 RESULT_SKIPPED_NO_AUTHOR = "skipped: mention author unknown"
+RESULT_SKIPPED_OPTED_OUT = "skipped: opted out"
+RESULT_SKIPPED_NO_CONSENT = "skipped: no consent"
 RESULT_SKIPPED_NO_CONSENT_RECORD = "skipped: no consent record"
 RESULT_SKIPPED_TEMPLATES_DISABLED = "skipped: templates disabled"
 REASON_SEND_FAILED = "send failed"

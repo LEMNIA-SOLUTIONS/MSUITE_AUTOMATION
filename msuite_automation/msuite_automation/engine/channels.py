@@ -47,8 +47,18 @@ def whatsapp_opted_out(phone: str) -> bool:
 	return module.is_opted_out(phone) if module else False
 
 
+def whatsapp_has_consent(phone: str) -> bool:
+	"""The WhatsApp recorded opt-in registry. A site without the app has nothing to send, so nothing to block."""
+	module = channel_app("WhatsApp")
+	return module.has_marketing_consent(phone) if module else True
+
+
 class RecipientOptedOut(Exception):
 	"""Raised by send_* when the recipient unsubscribed from this channel."""
+
+
+class RecipientNoConsent(Exception):
+	"""Raised by send_whatsapp when a MARKETING template has no recorded opt-in for the recipient."""
 
 
 class SendRetry(RuntimeError):
@@ -390,11 +400,13 @@ def send_whatsapp(automation, step, doc, phone=None) -> str | bool:
 			f"Workflow {_get(automation, 'name', 'Automation')}: no phone number for WhatsApp send on {doc_data.get('doctype')} {doc_data.get('name')}, skipping"
 		)
 		return False
-	from msuite_automation.msuite_automation.engine.steps import _is_marketing_opted_out
+	from msuite_automation.msuite_automation.engine.steps import _is_marketing_opted_out, _lacks_marketing_consent
 
 	ctx = frappe._dict(automation=automation, doc=doc, phone=phone or msg.get("to"))
 	if _is_marketing_opted_out(ctx, step):
 		raise RecipientOptedOut(msg["to"])
+	if _lacks_marketing_consent(ctx, step):
+		raise RecipientNoConsent(msg["to"])
 	if not claim_for_account(msg["account"], msg["to"]):
 		raise SendRetry("limit", "WhatsApp portfolio messaging limit reached; will retry")
 	res = send_to_phone(
