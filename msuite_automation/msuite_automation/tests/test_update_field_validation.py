@@ -18,7 +18,7 @@ def _step(field="status", value="Closed"):
 class TestUpdateFieldFollowsRecordRules(IntegrationTestCase):
 	def setUp(self):
 		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "ZZ aut103", "status": "Open"}).insert(ignore_permissions=True)
-		self.ctx = frappe._dict(automation=frappe._dict(name="MA-X", send_frequency="Every time"), doc=self.todo)
+		self.ctx = frappe._dict(automation=frappe._dict(name="MA-X", send_frequency="Every time", owner=SYSTEM_USER), doc=self.todo)
 
 	def tearDown(self):
 		frappe.db.rollback()
@@ -117,10 +117,51 @@ class TestUpdateFieldRunsAsAutomationOwner(IntegrationTestCase):
 		set_user.assert_not_called()
 		self.assertEqual((seen, result), ([SYSTEM_USER], "updated"))
 
-	def test_missing_owner_does_not_impersonate(self):
-		with patch.object(frappe, "set_user") as set_user:
-			self._run(None)
-		set_user.assert_not_called()
+	def test_missing_owner_fails_the_step_instead_of_falling_back(self):
+		for owner in (None, ""):
+			with self.subTest(owner=owner), patch("frappe.desk.doctype.todo.todo.ToDo.validate") as validate:
+				with self.assertRaises(frappe.ValidationError) as cm:
+					steps.execute(self._ctx(owner), _step())
+				validate.assert_not_called()
+				self.assertIn("missing or disabled", str(cm.exception))
+
+	def test_owner_without_write_access_fails_with_a_clear_message(self):
+		with patch.object(ToDo, "has_permission", return_value=False):
+			with self.assertRaises(frappe.PermissionError) as cm:
+				steps.execute(self._ctx(OWNER), _step())
+		self.assertIn(OWNER, str(cm.exception))
+		self.assertEqual(frappe.session.user, SYSTEM_USER)
+		self.assertEqual(frappe.db.get_value("ToDo", self.todo.name, "status"), "Open")
+
+	def test_real_executor_path_runs_the_save_as_the_owner(self):
+		"""C1 regression: effective_automation must carry the owner, or real runs silently save as Administrator."""
+		from msuite_automation.msuite_automation.engine import executor
+
+		automation = frappe._dict(name="MA-X", send_frequency="Every time", skip_return_documents=0, owner=OWNER,
+			phone_field="", email_field="", whatsapp_account=None, sms_account=None, variable_mappings=[], recipients=[])
+		step = frappe._dict(_step(), send_to=None)
+		step.get = lambda k, d=None: step[k] if k in step else d
+		graph = frappe._dict(steps={"u1": step})
+		ctx = frappe._dict(doc=self.todo)
+		seen, log = [], []
+		original = ToDo.validate
+
+		def validate(doc, *_a, **_k):
+			seen.append(frappe.session.user)
+			original(doc)
+
+		with patch.object(ToDo, "validate", validate):
+			executor._node_executor(automation, graph, ctx, log)({"path_id": "p1"}, "u1")
+		self.assertEqual(seen, [OWNER])
+		self.assertEqual(log[0]["result"], "updated")
+
+		# an invalid move through the same path fails the step
+		log.clear()
+		with patch.object(ToDo, "validate", side_effect=REJECT), patch("frappe.log_error"):
+			executor._node_executor(automation, graph, ctx, log)({"path_id": "p1"}, "u1")
+		self.assertEqual(log[0]["result"], "error")
+		self.assertIn("not a valid Lead pipeline move", log[0]["error"])
+		self.assertEqual(frappe.session.user, SYSTEM_USER)
 
 	def test_normal_session_user_is_not_impersonated(self):
 		frappe.set_user(OWNER)

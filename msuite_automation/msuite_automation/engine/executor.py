@@ -208,7 +208,7 @@ def effective_automation(automation, step, doctype):
 	phone = (field if phone_node else None) or (rec.phone_field if rec else None) or automation.get("phone_field") or ""
 	email = (field if step.step_type == SEND_EMAIL else None) or (rec.email_field if rec else None) or automation.get("email_field") or ""
 	return frappe._dict(
-		name=automation.name, send_frequency=automation.send_frequency, skip_return_documents=automation.skip_return_documents,
+		name=automation.name, owner=automation.get("owner"), send_frequency=automation.send_frequency, skip_return_documents=automation.skip_return_documents,
 		phone_field=phone, email_field=email,
 		whatsapp_account=step.get("whatsapp_account") or automation.whatsapp_account,
 		whatsapp_phone=step.get("whatsapp_phone") or "",

@@ -32,6 +32,7 @@ from msuite_inbox.inbox.services.mentions import graph
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
 	AUTOMATION_WRITE_FLAG,
+	OWNER_NO_WRITE_MESSAGE,
 	OWNER_UNUSABLE_MESSAGE,
 	SYSTEM_USER,
 	CONTEXT_MENTION_REPLY,
@@ -148,27 +149,33 @@ def update_value(doc, step):
 @contextlib.contextmanager
 def _run_as_owner(owner):
 	"""Run the block as the automation owner when the session is Administrator (scheduler / date-based runs),
-	because some rules (the Lead pipeline) skip Administrator. No switch when there is no owner, the owner is
-	Administrator, or the session is already a normal user.
+	because some rules (the Lead pipeline) skip Administrator. No switch when the owner is Administrator
+	(intentional bypass) or the session is already a normal user. The save then also needs the owner's write
+	permission on the record.
 
 	Args:
-		owner: the Messaging Automation's owner (user id) or None.
+		owner: the Messaging Automation's owner (user id); empty counts as unusable.
 
 	Raises:
-		frappe.ValidationError: owner is missing or disabled (never falls back to Administrator).
+		frappe.ValidationError: owner is empty, missing or disabled
+		frappe.PermissionError: owner may not update the record (message names the owner) (never falls back to Administrator).
 
 	Side Effects:
 		frappe.set_user; the previous user is restored in finally, also when the block raises.
 	"""
-	if not owner or owner == SYSTEM_USER or frappe.session.user != SYSTEM_USER:
+	if owner == SYSTEM_USER or frappe.session.user != SYSTEM_USER:
 		yield
 		return
-	if not frappe.db.get_value("User", owner, "enabled"):
+	if not owner or not frappe.db.get_value("User", owner, "enabled"):
 		frappe.throw(OWNER_UNUSABLE_MESSAGE.format(owner))
 	previous = frappe.session.user
-	frappe.set_user(owner)
 	try:
+		# frappe.set_user also resets cache/form_dict/role perms; harmless in the background jobs that hit this branch.
+		frappe.set_user(owner)
 		yield
+	except frappe.PermissionError as e:
+		# Frappe's own PermissionError carries no text; say whose permission was missing.
+		raise frappe.PermissionError(OWNER_NO_WRITE_MESSAGE.format(owner)) from e
 	finally:
 		frappe.set_user(previous)
 
