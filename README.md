@@ -16,6 +16,7 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 
 #### Validation & Run Behaviour (UAT fixes)
 - **Date Based triggers**: `offset_days` must be a whole number from `OFFSET_DAYS_MIN` (1) to `OFFSET_DAYS_MAX` (10); defined in `constants.py` and enforced in `Messaging Automation._validate_triggers`. Wait steps must be a whole number greater than 0 (no upper cap).
+- **Variable mapping**: a chosen WhatsApp template with an unmapped variable (neither a source field nor a fallback value) blocks every save, drafts included ("Automation is not valid"). Bulk campaign steps are skipped.
 - **Activation checks (`engine/graph.py`)**: turning an automation on is blocked by empty If/Else branches and by unconnected (orphan) steps; saving a draft only warns. Field Change triggers also fire when a record is created with the matching value (no separate "also on create" option).
 - **Send-to field types**: WhatsApp, SMS and Add to List need a Phone field, Send Email needs an Email field; a blank Update Field value is rejected when the target field is mandatory.
 - **Dry run (`engine/preview.py`)**: the result carries a `trigger` check (Field Change current value, Date Based date window; Document Event / Schedule are "not evaluated"). Steps are still previewed when the trigger would not match. Skipped steps show their reason on the canvas node.
