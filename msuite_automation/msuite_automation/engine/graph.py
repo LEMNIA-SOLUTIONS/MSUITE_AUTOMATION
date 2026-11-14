@@ -15,10 +15,13 @@ from msuite_core.constants import (
 	MESSENGER_TEMPLATE_TITLE_MAX,
 	SOCIAL_MENTION_DOCTYPE,
 )
-from msuite_automation.msuite_automation.constants import IG_CONSENT_MIN_EXPIRY_DAYS
 from msuite_automation.msuite_automation.constants import (
 	ACTION_TYPES,
+	DATE_BASED,
 	IF_ELSE,
+	IG_CONSENT_MIN_EXPIRY_DAYS,
+	OFFSET_DAYS_MAX,
+	OFFSET_DAYS_MIN,
 	SEND_IG_CONSENT_TEMPLATE,
 	SEND_IG_PUBLIC_REPLY,
 	SEND_WHATSAPP,
@@ -144,6 +147,58 @@ class Graph:
 		return False
 
 
+def _is_whole_number(val) -> bool:
+	"""Check whether val represents a whole integer number.
+
+	Args:
+		val: Value to inspect.
+
+	Returns:
+		bool: True if val is a whole number (e.g. 1, 10, "5", 5.0).
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	if val is None or isinstance(val, bool):
+		return False
+	if isinstance(val, int):
+		return True
+	if isinstance(val, float):
+		return val.is_integer()
+	if isinstance(val, str):
+		s = val.strip()
+		if s.startswith("-") or s.startswith("+"):
+			s = s[1:]
+		return s.isdigit()
+	return False
+
+
+def _to_int(val) -> int | None:
+	"""Convert val to an integer if it represents a whole number, otherwise None.
+
+	Args:
+		val: Value to convert.
+
+	Returns:
+		int | None: Integer value or None if not a valid whole number.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	if not _is_whole_number(val):
+		return None
+	try:
+		return int(float(str(val).strip()))
+	except (ValueError, TypeError):
+		return None
+
+
 def validate_graph(triggers, steps, edges) -> list[str]:
 	errors: list[str] = []
 	seen: set = set()
@@ -152,6 +207,11 @@ def validate_graph(triggers, steps, edges) -> list[str]:
 		if nid in seen:
 			errors.append(f"Duplicate node id: {nid}")
 		seen.add(nid)
+		if g(t, "trigger_type") == DATE_BASED:
+			offset = _to_int(g(t, "offset_days"))
+			if offset is None or offset < OFFSET_DAYS_MIN or offset > OFFSET_DAYS_MAX:
+				lbl = g(t, "label") or nid
+				errors.append(f"Trigger {lbl}: offset days must be a whole number from {OFFSET_DAYS_MIN} to {OFFSET_DAYS_MAX}")
 	for s in steps or []:
 		nid = g(s, "step_id")
 		if nid in seen:
@@ -176,11 +236,36 @@ def validate_graph(triggers, steps, edges) -> list[str]:
 		sid, stype = g(st, "step_id"), g(st, "step_type")
 		if stype == SEND_WHATSAPP and not g(st, "template"):
 			errors.append(f"Step {sid}: WhatsApp template is required")
-		if stype == WAIT and int(g(st, "wait_value") or 0) <= 0:
-			errors.append(f"Step {sid}: wait must be greater than 0")
+		if stype == WAIT:
+			wv = g(st, "wait_value")
+			if not _is_whole_number(wv):
+				try:
+					f = float(str(wv).strip())
+					if f > 0:
+						errors.append(f"Step {sid}: wait must be a whole number")
+					else:
+						errors.append(f"Step {sid}: wait must be greater than 0")
+				except (ValueError, TypeError):
+					errors.append(f"Step {sid}: wait must be a whole number")
+			else:
+				n = int(float(str(wv).strip()))
+				if n <= 0:
+					errors.append(f"Step {sid}: wait must be greater than 0")
 		if stype == WAIT_EVENT:
-			if int(g(st, "wait_value") or 0) <= 0:
-				errors.append(f"Step {sid}: timeout must be greater than 0")
+			wv = g(st, "wait_value")
+			if not _is_whole_number(wv):
+				try:
+					f = float(str(wv).strip())
+					if f > 0:
+						errors.append(f"Step {sid}: timeout must be a whole number")
+					else:
+						errors.append(f"Step {sid}: timeout must be greater than 0")
+				except (ValueError, TypeError):
+					errors.append(f"Step {sid}: timeout must be a whole number")
+			else:
+				n = int(float(str(wv).strip()))
+				if n <= 0:
+					errors.append(f"Step {sid}: timeout must be greater than 0")
 			rules_raw = g(st, "condition_rules")
 			rules = []
 			if rules_raw:
@@ -256,25 +341,89 @@ def validate_warnings(triggers, steps, edges) -> list[str]:
 	Side Effects:
 		None.
 	"""
-	consent_steps = [st for st in steps or [] if g(st, "step_type") == SEND_IG_CONSENT_TEMPLATE]
-	if not consent_steps:
-		return []
+	warnings: list[str] = []
 	graph = Graph(triggers, steps, edges)
-	return [
-		f"Step {sid}: Send IG Consent Template is not downstream of a Wait for Event step checking {IG_CONSENT_DOCTYPE}"
-		for sid in (g(st, "step_id") for st in consent_steps)
+
+	consent_steps = [st for st in steps or [] if g(st, "step_type") == SEND_IG_CONSENT_TEMPLATE]
+	for sid in (g(st, "step_id") for st in consent_steps):
 		if not any(
 			g(other_st, "step_type") == WAIT_EVENT
 			and g(other_st, "check_doctype") == IG_CONSENT_DOCTYPE
 			and sid in graph.reachable(other_sid)
 			for other_sid, other_st in graph.steps.items()
-		)
-	]
+		):
+			warnings.append(
+				f"Step {sid}: Send IG Consent Template is not downstream of a Wait for Event step checking {IG_CONSENT_DOCTYPE}"
+			)
+
+	for st in steps or []:
+		if g(st, "step_type") == IF_ELSE:
+			sid = g(st, "step_id")
+			rules_raw = g(st, "condition_rules")
+			rules = []
+			if rules_raw:
+				try:
+					rules = json.loads(rules_raw) if isinstance(rules_raw, str) else rules_raw
+				except (ValueError, TypeError):
+					rules = []
+			if not rules:
+				warnings.append(f"Step {sid}: add at least one rule")
+
+	if triggers:
+		reachable_from_triggers: set[str] = set()
+		for tid in graph.triggers:
+			reachable_from_triggers |= graph.reachable(tid)
+		for sid in graph.steps:
+			if sid not in reachable_from_triggers:
+				warnings.append(f"Step {sid} is not connected to the flow")
+
+	return warnings
 
 
 def validate_activation(triggers, steps, edges) -> list[str]:
+	"""Validate that an automation meets all requirements for activation.
+
+	Args:
+		triggers: Iterable of Automation Trigger rows or dicts.
+		steps: Iterable of Automation Step rows or dicts.
+		edges: Iterable of Automation Edge rows or tuples.
+
+	Returns:
+		list[str]: Blocker error messages.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
 	if not triggers:
 		return ["Add at least one trigger"]
 	graph = Graph(triggers, steps, edges)
-	return [f"Trigger {tid} does not lead to any action" for tid in graph.triggers
-		if not any(g(graph.steps.get(n) or {}, "step_type") in ACTION_TYPES for n in graph.reachable(tid))]
+	errors: list[str] = []
+
+	for tid in graph.triggers:
+		if not any(g(graph.steps.get(n) or {}, "step_type") in ACTION_TYPES for n in graph.reachable(tid)):
+			errors.append(f"Trigger {tid} does not lead to any action")
+
+	for st in steps or []:
+		if g(st, "step_type") == IF_ELSE:
+			sid = g(st, "step_id")
+			rules_raw = g(st, "condition_rules")
+			rules = []
+			if rules_raw:
+				try:
+					rules = json.loads(rules_raw) if isinstance(rules_raw, str) else rules_raw
+				except (ValueError, TypeError):
+					rules = []
+			if not rules:
+				errors.append(f"Step {sid}: add at least one rule")
+
+	reachable_from_triggers: set[str] = set()
+	for tid in graph.triggers:
+		reachable_from_triggers |= graph.reachable(tid)
+	for sid in graph.steps:
+		if sid not in reachable_from_triggers:
+			errors.append(f"Step {sid} is not connected to the flow")
+
+	return errors

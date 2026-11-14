@@ -11,7 +11,7 @@ from frappe.utils import add_to_date, nowdate
 TRIGGER_EVENT_MAP = {**EVENT_MAP, "on_trash": "On Trash"}
 
 from msuite_automation.msuite_automation.constants import (
-	DATE_BASED, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, QUEUE_SHORT, SCHEDULE,
+	AUTOMATION_WRITE_FLAG, DATE_BASED, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, QUEUE_SHORT, SCHEDULE,
 )
 from msuite_automation.msuite_automation.engine.filters import _get, normalize
 
@@ -155,6 +155,8 @@ def on_doc_event(doc, method: str) -> None:
 		return
 	try:
 		flags = getattr(doc, "flags", None) or {}
+		if _get(flags, AUTOMATION_WRITE_FLAG):
+			return  # saved by an Update Field step: never start automations from our own write
 		if method in WATCH_METHODS and not (method == "on_update" and _get(flags, "in_insert")) and doctype in get_watch_map():
 			docname = getattr(doc, "name", None)
 			if docname:

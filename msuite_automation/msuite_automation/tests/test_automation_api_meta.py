@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -37,7 +38,8 @@ class TestAutomationApiMeta(unittest.TestCase):
 
 	def setUp(self):
 		"""Set up test environment and reset user to Administrator."""
-		frappe.flags = frappe._dict(mute_messages=True, in_test=True)
+		self._orig_flags = frappe.flags
+		frappe.flags = frappe._dict(mute_messages=True, in_test=True, currently_saving=[])
 		if frappe.client_cache is None:
 			frappe.client_cache = MagicMock()
 		if not hasattr(frappe.local, "session") or frappe.local.session is None:
@@ -50,7 +52,8 @@ class TestAutomationApiMeta(unittest.TestCase):
 			self._meta_patcher.start()
 
 	def tearDown(self):
-		"""Rollback any database transaction and reset user."""
+		"""Rollback any database transaction, reset user and restore the original frappe.flags."""
+		frappe.flags = self._orig_flags
 		if hasattr(self, "_meta_patcher"):
 			self._meta_patcher.stop()
 		if hasattr(frappe.local, "db") and frappe.local.db:
@@ -138,3 +141,13 @@ class TestAutomationApiMeta(unittest.TestCase):
 		with patch("msuite_core.services.permissions.checks.frappe.has_permission", return_value=False):
 			with self.assertRaises(frappe.PermissionError):
 				api.get_condition_edit_access()
+
+
+class TestFlagsRestored(unittest.TestCase):
+	"""Regression: TestAutomationApiMeta must not leave frappe.flags without currently_saving."""
+
+	def test_flags_currently_saving_is_list_after_meta_tests(self):
+		"""Run the meta test case, then assert frappe.flags.currently_saving is still a list."""
+		suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestAutomationApiMeta)
+		unittest.TextTestRunner(stream=open(os.devnull, "w")).run(suite)
+		self.assertIsInstance(frappe.flags.currently_saving, list)

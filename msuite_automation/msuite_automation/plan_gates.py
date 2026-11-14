@@ -50,7 +50,7 @@ GATES = {
 		label="Automation Runs",
 		count_doctype="Messaging Automation Run",
 		period="month",
-		skip_if=lambda doc: bool(getattr(doc, "name", None) and not doc.is_new()),
+		skip_if=lambda doc: bool(getattr(doc.flags, "is_retry", False) or (getattr(doc, "name", None) and not doc.is_new())),
 		on_methods=("before_insert",),
 	),
 }
