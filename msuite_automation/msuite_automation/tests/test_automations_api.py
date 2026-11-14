@@ -403,6 +403,43 @@ class TestAutomationsApi(unittest.TestCase):
 		self.assertEqual(runs[0]["log"][1]["status"], "failed")
 		self.assertEqual(runs[0]["log"][1]["status_error"], "User blocked sender")
 
+	def _run_with_message(self, title, run_status="Completed"):
+		name = api.save_automation(self._payload(title=title))["name"]
+		frappe.get_doc({"doctype": "Messaging Automation Run", "automation": name, "status": run_status,
+			"log": json.dumps([{"step_id": "wa", "step_type": "Send WhatsApp", "result": "sent", "message": "CM-T-1"}])}
+		).insert(ignore_permissions=True, ignore_links=True)
+		return name
+
+	def _get_runs_with_cm(self, name, status, error=None):
+		real = frappe.get_all
+		def fake(doctype, *a, **kw):
+			if doctype == "Channel Message":
+				return [{"name": "CM-T-1", "status": status, "status_error": error}]
+			return real(doctype, *a, **kw)
+		with patch("frappe.get_all", side_effect=fake):
+			return api.get_runs(name)
+
+	def test_aut120_delivery_failure_shows_run_as_failed(self):
+		name = self._run_with_message("ZZ aut120 delivery failed")
+		run = self._get_runs_with_cm(name, "Failed", "User blocked sender")[0]
+		self.assertEqual((run["status"], run["error"], run["delivery_failed"]), ("Failed", "User blocked sender", True))
+
+	def test_aut120_delivered_message_keeps_run_completed(self):
+		name = self._run_with_message("ZZ aut120 delivered")
+		run = self._get_runs_with_cm(name, "Delivered")[0]
+		self.assertEqual((run["status"], run["error"], run["delivery_failed"]), ("Completed", "", False))
+
+	def test_aut120_failed_without_reason_uses_generic_error(self):
+		name = self._run_with_message("ZZ aut120 no reason")
+		run = self._get_runs_with_cm(name, "Failed")[0]
+		self.assertEqual(run["status"], "Failed")
+		self.assertTrue(run["error"])
+
+	def test_aut120_stored_failed_run_is_not_marked_delivery_failed(self):
+		name = self._run_with_message("ZZ aut120 stored failed", run_status="Failed")
+		run = self._get_runs_with_cm(name, "Failed", "x")[0]
+		self.assertFalse(run["delivery_failed"])
+
 	def test_aut120_get_runs_empty_log_no_channel_message_query(self):
 		name = api.save_automation(self._payload(title="ZZ aut120 empty log"))["name"]
 		frappe.get_doc({

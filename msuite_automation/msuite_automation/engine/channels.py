@@ -61,11 +61,19 @@ class RecipientNoConsent(Exception):
 	"""Raised by send_whatsapp when a MARKETING template has no recorded opt-in for the recipient."""
 
 
-class SendRetry(RuntimeError):
+class SendFailed(RuntimeError):
+	"""A send the channel rejected. `channel_message` is the Failed Channel Message the channel recorded, if any."""
+
+	def __init__(self, message: str, channel_message: str | None = None):
+		super().__init__(message)
+		self.channel_message = channel_message
+
+
+class SendRetry(SendFailed):
 	"""A send that failed in a way that is safe to repeat later (never accepted by Meta)."""
 
-	def __init__(self, kind: str, message: str):
-		super().__init__(message)
+	def __init__(self, kind: str, message: str, channel_message: str | None = None):
+		super().__init__(message, channel_message)
 		self.kind = kind
 
 
@@ -388,7 +396,7 @@ def send_whatsapp(automation, step, doc, phone=None) -> str | bool:
 	Raises:
 		RecipientOptedOut: If recipient opted out of marketing templates.
 		SendRetry: If messaging limit reached or retryable error occurs.
-		RuntimeError: If WhatsApp send fails permanently.
+		SendFailed: (a RuntimeError) If WhatsApp send fails permanently; carries the failed Channel Message name.
 
 	Side Effects:
 		Dispatches WhatsApp message via inbox outbound service.
@@ -418,8 +426,8 @@ def send_whatsapp(automation, step, doc, phone=None) -> str | bool:
 	)
 	if isinstance(res, dict) and not res.get("ok", True):
 		if res.get("retry"):
-			raise SendRetry(res["retry"], res.get("error") or "WhatsApp send failed")
-		raise RuntimeError(res.get("error") or "WhatsApp send failed")
+			raise SendRetry(res["retry"], res.get("error") or "WhatsApp send failed", res.get("message"))
+		raise SendFailed(res.get("error") or "WhatsApp send failed", res.get("message"))
 	if isinstance(res, dict) and res.get("message"):
 		return res["message"]
 	return True

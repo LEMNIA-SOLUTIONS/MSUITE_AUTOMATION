@@ -19,7 +19,8 @@ from msuite_automation.msuite_automation.constants import (
 )
 from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_automation.msuite_automation.constants import (
-	DATE_BASED, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, RUN_DOCTYPE, RUN_ERROR_MAX, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, SCHEDULE,
+	DATE_BASED, DELIVERY_FAILED_DEFAULT_ERROR, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, MESSAGE_STATUS_FAILED, RUN_DOCTYPE, RUN_ERROR_MAX,
+	RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RUN_STATUS_FAILED, SCHEDULE,
 	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
 )
 from msuite_automation.msuite_automation.engine import preview
@@ -368,6 +369,20 @@ def _last_run_error(log_entries: list) -> str:
 	return ""
 
 
+def _mark_delivery_failure(run) -> None:
+	"""Show a run as Failed when WhatsApp reports one of its messages as failed after sending.
+
+	Display only: the stored run status is unchanged, and `delivery_failed` tells the UI
+	that Retry does not apply (retry_run accepts only runs stored as Failed).
+	"""
+	failed = [e for e in run.log if isinstance(e, dict) and str(e.get("status") or "").lower() == MESSAGE_STATUS_FAILED]
+	if not failed or run.status == RUN_STATUS_FAILED:
+		return
+	run.status = RUN_STATUS_FAILED
+	run["delivery_failed"] = True
+	run["error"] = str(failed[-1].get("status_error") or DELIVERY_FAILED_DEFAULT_ERROR)[:RUN_ERROR_MAX]
+
+
 @frappe.whitelist()
 def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 	"""Retrieve execution runs for an automation with Channel Message delivery status merged.
@@ -399,7 +414,8 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 			r.log = []
 		r.creation = str(r.creation)
 		r.resume_at = str(r.resume_at) if r.resume_at else None
-		r["error"] = _last_run_error(r.log) if r.status == "Failed" else ""
+		r["error"] = _last_run_error(r.log) if r.status == RUN_STATUS_FAILED else ""
+		r["delivery_failed"] = False
 		for entry in r.log:
 			if isinstance(entry, dict) and entry.get("message"):
 				msg_names.add(entry["message"])
@@ -419,6 +435,8 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 						entry["status"] = cm["status"]
 					if cm.get("status_error"):
 						entry["status_error"] = cm["status_error"]
+		for r in rows:
+			_mark_delivery_failure(r)
 
 	return rows
 

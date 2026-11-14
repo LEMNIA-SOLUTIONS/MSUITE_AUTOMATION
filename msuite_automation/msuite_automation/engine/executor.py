@@ -269,6 +269,8 @@ def _node_executor(automation, graph, ctx, log):
 				return WAIT_SIGNAL
 			path["retry_count"] = 0
 			entry["result"], entry["error"] = "error", str(e)[:RUN_ERROR_MAX]
+			if getattr(e, "channel_message", None):
+				entry["message"] = e.channel_message
 			frappe.log_error(title=f"Messaging Automation {automation.name} step {node_id} failed")
 		return ""
 	return execute
@@ -280,9 +282,9 @@ def _persist(run, paths, log) -> None:
 		if str(entry.get("step_type", "")).startswith("Send"):
 			node_key = (entry.get("path_id"), entry.get("node_id") or entry.get("step_id"))
 			last_sends[node_key] = entry
-	# A rejected Update Field value fails the run; sends fail it only when every send errored.
+	# A rejected Update Field value or any send that errored fails the run (retry skips sends already made).
 	update_failed = any(entry.get("step_type") == UPDATE_FIELD and entry.get("result") == "error" for entry in log)
-	failed = update_failed or (bool(last_sends) and all(entry.get("result") == "error" for entry in last_sends.values()))
+	failed = update_failed or any(entry.get("result") == "error" for entry in last_sends.values())
 	waiting = any(p["status"] == PATH_WAITING for p in paths)
 	run.set("paths", [{"path_id": p["path_id"], "node_id": p["node_id"], "status": p["status"],
 		"executed": 1 if p.get("executed") else 0, "joined": 1 if p.get("joined") else 0,

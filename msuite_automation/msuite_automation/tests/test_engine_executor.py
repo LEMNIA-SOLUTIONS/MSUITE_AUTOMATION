@@ -140,6 +140,27 @@ class TestGraphRun(unittest.TestCase):
 		self.assertEqual(log_of(run)[2][1], "sent")
 		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run, "sent_count"), 1)
 
+	def test_aut120_partial_send_failure_marks_run_failed(self, sms_, email, wa):
+		email.side_effect = RuntimeError("smtp down")
+		name = make([{"step_id": "e", "step_type": "Send Email", "email_subject": "x"}, sms("s")], [("t1", "", "e"), ("e", "", "s")])
+		run = executor.run_automation(name, "t1", "ToDo", todo())
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run, "status"), "Failed")
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run, "sent_count"), 1)
+
+	def test_aut120_all_sends_ok_stays_completed(self, *_):
+		name = make([sms("s")], [("t1", "", "s")])
+		run = executor.run_automation(name, "t1", "ToDo", todo())
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run, "status"), "Completed")
+
+	def test_aut120_failed_send_links_channel_message_in_run_log(self, sms_, email, wa):
+		err = RuntimeError("Recipient blocked")
+		err.channel_message = "CM-FAIL-1"
+		wa.side_effect = err
+		name = make([{"step_id": "w", "step_type": "Send WhatsApp", "template": "t"}], [("t1", "", "w")])
+		run = executor.run_automation(name, "t1", "ToDo", todo())
+		entry = json.loads(frappe.db.get_value(RUN_DOCTYPE, run, "log"))[1]
+		self.assertEqual((entry["result"], entry["error"], entry["message"]), ("error", "Recipient blocked", "CM-FAIL-1"))
+
 	def test_run_automation_marks_failed_on_exception(self, *_):
 		name = make([sms("s")], [("t1", "", "s")])
 		with patch.object(executor, "advance", side_effect=RuntimeError("boom")):
