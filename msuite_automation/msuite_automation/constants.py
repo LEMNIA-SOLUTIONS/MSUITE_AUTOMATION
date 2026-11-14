@@ -98,6 +98,9 @@ RESULT_SKIPPED_NO_CONSENT = "skipped: no consent"
 RESULT_SKIPPED_NO_CONSENT_RECORD = "skipped: no consent record"
 RESULT_SKIPPED_TEMPLATES_DISABLED = "skipped: templates disabled"
 REASON_SEND_FAILED = "send failed"
+RUN_STATUS_FAILED = "Failed"
+MESSAGE_STATUS_FAILED = "failed"  # Channel Message status, compared lower-case
+DELIVERY_FAILED_DEFAULT_ERROR = "Message delivery failed"
 RETRY_MENTION_PENDING = "mention resolution pending"
 CONTEXT_MENTION_REPLY = "mention reply"
 

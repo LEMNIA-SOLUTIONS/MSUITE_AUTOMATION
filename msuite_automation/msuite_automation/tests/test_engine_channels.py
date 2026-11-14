@@ -54,6 +54,35 @@ class TestChannels(unittest.TestCase):
 		res = channels.send_whatsapp(a, step, doc)
 		self.assertEqual(res, "CM-TEST-1")
 
+	def _wa_fixture(self, tpl):
+		tpl.return_value = frappe._dict(name="t", language_code="en", parameter_format="POSITIONAL", template="Hi",
+			header_type=None, buttons=[])
+		a = frappe._dict(name="MA-1", whatsapp_account="acc", phone_field=None, variable_mappings=[])
+		step = frappe._dict(step_id="wa", template="t", header_source="None", button_fields=None)
+		return a, step, frappe._dict(doctype="CRM Lead", name="L1", mobile_no="9876543210")
+
+	@patch(f"{CH}.send_to_phone", return_value={"ok": False, "error": "Recipient blocked", "message": "CM-FAIL-1"})
+	@patch(f"{CH}._template")
+	def test_aut120_rejected_send_keeps_failed_channel_message(self, tpl, send):
+		with self.assertRaises(RuntimeError) as ctx:
+			channels.send_whatsapp(*self._wa_fixture(tpl))
+		self.assertEqual(str(ctx.exception), "Recipient blocked")
+		self.assertEqual(ctx.exception.channel_message, "CM-FAIL-1")
+
+	@patch(f"{CH}.send_to_phone", return_value={"ok": False, "error": "rate", "retry": "transient", "message": "CM-FAIL-2"})
+	@patch(f"{CH}._template")
+	def test_aut120_retryable_failure_keeps_channel_message(self, tpl, send):
+		with self.assertRaises(channels.SendRetry) as ctx:
+			channels.send_whatsapp(*self._wa_fixture(tpl))
+		self.assertEqual(ctx.exception.channel_message, "CM-FAIL-2")
+
+	@patch(f"{CH}.send_to_phone", return_value={"ok": False, "error": "boom"})
+	@patch(f"{CH}._template")
+	def test_aut120_rejected_send_without_message_has_no_link(self, tpl, send):
+		with self.assertRaises(RuntimeError) as ctx:
+			channels.send_whatsapp(*self._wa_fixture(tpl))
+		self.assertIsNone(ctx.exception.channel_message)
+
 	@patch(f"{CH}.frappe.sendmail")
 	def test_send_email(self, sendmail):
 		a = frappe._dict(name="MA-1", email_field="email_id")
