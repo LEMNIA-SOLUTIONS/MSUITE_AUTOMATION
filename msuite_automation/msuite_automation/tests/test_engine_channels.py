@@ -231,12 +231,50 @@ class TestChannels(unittest.TestCase):
 			res = get_deal_primary_contact_mobile(deal)
 			mock_ga.assert_called_once_with(
 				"CRM Contacts",
-				filters={"parent": "CRM-DEAL-0005", "parenttype": "CRM Deal"},
+				filters={"parent": "CRM-DEAL-0005", "parenttype": "CRM Deal", "is_primary": 1},
 				fields=["mobile_no", "contact"],
-				order_by="is_primary desc, idx asc",
+				order_by="idx asc",
 				limit=1,
 			)
 			self.assertEqual(res, "919123456789")
+
+	def test_deal_db_only_non_primary_contacts_returns_none(self):
+		"""Verify that unloaded Deal contacts with only non-primary DB rows returns None."""
+		from msuite_automation.msuite_automation.engine.filters import get_deal_primary_contact_mobile
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0006",
+			mobile_no="",
+		)
+		with patch("frappe.get_all", return_value=[]) as mock_ga:
+			res = get_deal_primary_contact_mobile(deal)
+			mock_ga.assert_called_once_with(
+				"CRM Contacts",
+				filters={"parent": "CRM-DEAL-0006", "parenttype": "CRM Deal", "is_primary": 1},
+				fields=["mobile_no", "contact"],
+				order_by="idx asc",
+				limit=1,
+			)
+			self.assertIsNone(res)
+
+	def test_deal_db_two_primary_contacts_picks_lowest_idx(self):
+		"""Verify that unloaded Deal contacts query orders by idx asc to pick lowest idx."""
+		from msuite_automation.msuite_automation.engine.filters import get_deal_primary_contact_mobile
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0007",
+			mobile_no="",
+		)
+		with patch("frappe.get_all", return_value=[{"mobile_no": "919876543211", "contact": "C1"}]) as mock_ga:
+			res = get_deal_primary_contact_mobile(deal)
+			mock_ga.assert_called_once_with(
+				"CRM Contacts",
+				filters={"parent": "CRM-DEAL-0007", "parenttype": "CRM Deal", "is_primary": 1},
+				fields=["mobile_no", "contact"],
+				order_by="idx asc",
+				limit=1,
+			)
+			self.assertEqual(res, "919876543211")
 
 	def test_deal_two_primary_contacts_picks_lowest_idx(self):
 		"""Verify that a Deal with two is_primary child rows picks the one with the lowest idx."""

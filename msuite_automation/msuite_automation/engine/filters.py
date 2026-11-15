@@ -19,6 +19,7 @@ ALIASES = {"awb_number": "lr_no", "lr_no": "awb_number"}
 
 
 def normalize(v) -> str:
+	"""Return stripped string or empty string if None."""
 	return "" if v is None else str(v).strip()
 
 
@@ -31,6 +32,7 @@ def _clean(val) -> str | None:
 
 
 def _get(obj, field, default=None):
+	"""Get attribute or dict key from obj with default fallback."""
 	if obj is None:
 		return default
 	return obj.get(field, default) if hasattr(obj, "get") else getattr(obj, field, default)
@@ -51,9 +53,9 @@ def get_deal_primary_contact_mobile(doc, field: str | None = None) -> str | None
 	elif _get(doc, "name"):
 		rows = frappe.get_all(
 			DEAL_CONTACTS_CHILD_DOCTYPE,
-			filters={"parent": _get(doc, "name"), "parenttype": DEAL_DOCTYPE},
+			filters={"parent": _get(doc, "name"), "parenttype": DEAL_DOCTYPE, "is_primary": 1},
 			fields=[FIELD_MOBILE_NO, "contact"],
-			order_by="is_primary desc, idx asc",
+			order_by="idx asc",
 			limit=1,
 		)
 		row = rows[0] if rows else None
@@ -151,6 +153,7 @@ def field_value(doc, field: str):
 
 
 def rules_pass(rules: list[dict], logic: str, doc) -> bool:
+	"""Evaluate a list of filter rules against doc using All or Any logic."""
 	rules = [r for r in rules or [] if isinstance(r, dict) and r.get("field")]
 	if not rules:
 		return True
@@ -159,6 +162,7 @@ def rules_pass(rules: list[dict], logic: str, doc) -> bool:
 
 
 def rule_ok(actual, operator: str, expected) -> bool:
+	"""Evaluate a single rule operator against actual and expected values."""
 	if operator == "is set":
 		return bool(normalize(actual))
 	if operator == "is not set":
