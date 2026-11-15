@@ -447,6 +447,164 @@ class TestGraphRun(unittest.TestCase):
 			executor._persist(run, paths, log)
 		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
 
+	def test_recipient_skipped_send_with_successful_update_field_stays_completed(self, *_):
+		"""MED-2: A run with recipient-skipped send and successful Update Field stays Completed.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Completed.
+
+		Raises:
+			None.
+
+		Side Effects:
+			None.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s2", "status": "Ended"}]
+		log = [
+			{"path_id": "p1", "node_id": "s1", "step_type": "Update Field", "result": "updated", "outcome_status": "updated"},
+			{"path_id": "p1", "node_id": "s2", "step_type": "Send WhatsApp", "result": "skipped: no recipient", "outcome_status": "skipped", "reason": "no recipient"},
+		]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
+
+	def test_recipient_skipped_send_with_successful_add_to_list_stays_completed(self, *_):
+		"""MED-2: A run with recipient-skipped send and successful Add to List stays Completed.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Completed.
+
+		Raises:
+			None.
+
+		Side Effects:
+			None.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s2", "status": "Ended"}]
+		log = [
+			{"path_id": "p1", "node_id": "s1", "step_type": "Add to Recipient List", "result": "added", "outcome_status": "added"},
+			{"path_id": "p1", "node_id": "s2", "step_type": "Send WhatsApp", "result": "skipped: no recipient", "outcome_status": "skipped", "reason": "no recipient"},
+		]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
+
+	def test_recipient_skipped_send_with_skipped_add_to_list_marks_run_skipped(self, *_):
+		"""MED-2: A run where send is recipient-skipped and Add to List is skipped marks run Skipped.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Skipped.
+
+		Raises:
+			None.
+
+		Side Effects:
+			None.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s2", "status": "Ended"}]
+		log = [
+			{"path_id": "p1", "node_id": "s1", "step_type": "Add to Recipient List", "result": "skipped: already in list", "outcome_status": "skipped", "reason": "already in list"},
+			{"path_id": "p1", "node_id": "s2", "step_type": "Send WhatsApp", "result": "skipped: no recipient", "outcome_status": "skipped", "reason": "no recipient"},
+		]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_SKIPPED)
+
+	def test_delivered_message_status_does_not_change_outcome_logic(self, *_):
+		"""EXTRA: A message delivery status ('delivered') in entry['status'] does not collide with outcome logic.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts is_recipient_skip and _persist correctly use outcome_status.
+
+		Raises:
+			None.
+
+		Side Effects:
+			None.
+		"""
+		# 1. Skipped send with Channel Message status 'delivered' is still recognized as recipient skip
+		entry_skip = {
+			"step_type": "Send WhatsApp",
+			"outcome_status": "skipped",
+			"reason": "no recipient",
+			"status": "delivered",
+			"result": "skipped: no recipient",
+		}
+		self.assertTrue(executor.is_recipient_skip(entry_skip))
+
+		# 2. Sent message with Channel Message status 'delivered' is not recognized as skip
+		entry_sent = {
+			"step_type": "Send WhatsApp",
+			"outcome_status": "sent",
+			"status": "delivered",
+			"result": "sent",
+		}
+		self.assertFalse(executor.is_recipient_skip(entry_sent))
+
+		# 3. Legacy log shape with 'status': 'skipped' and no 'outcome_status' is still recognized
+		entry_legacy = {
+			"step_type": "Send WhatsApp",
+			"status": "skipped",
+			"reason": "no recipient",
+			"result": "skipped: no recipient",
+		}
+		self.assertTrue(executor.is_recipient_skip(entry_legacy))
+
+		# 4. _persist with delivered message on a sent step keeps run Completed
+		run_sent = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run_sent.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+		log_sent = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "outcome_status": "sent", "status": "delivered", "result": "sent"}]
+		with patch.object(run_sent, "save"):
+			executor._persist(run_sent, paths, log_sent)
+		self.assertEqual(run_sent.status, RUN_STATUS_COMPLETED)
+
 
 class TestSentCount(unittest.TestCase):
 	def test_sent_count_counts_whole_log(self):

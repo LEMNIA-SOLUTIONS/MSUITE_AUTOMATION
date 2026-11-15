@@ -83,6 +83,7 @@ SEND_STEPS = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS)
 ACTION_TYPES = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS, UPDATE_FIELD, ADD_TO_LIST, SEND_IG_PUBLIC_REPLY, SEND_IG_CONSENT_TEMPLATE)
 
 # ── Structured step execution outcome (Task 4 / D7) ─────────────────────────
+STEP_OUTCOME_KEY = "outcome_status"
 STEP_STATUS_SENT = "sent"
 STEP_STATUS_SKIPPED = "skipped"
 STEP_STATUS_UPDATED = "updated"
@@ -115,10 +116,11 @@ class StepOutcome(str):
 	"""Execution outcome of an automation step.
 
 	Inherits from str so existing string comparisons and JSON serialization work
-	without churn, while carrying structured .status and .reason attributes.
+	without churn, while carrying structured .status, .outcome_status, and .reason attributes.
 	"""
 
 	status: str
+	outcome_status: str
 	reason: str | None
 
 	def __new__(cls, display: str, status: str, reason: str | None = None):
@@ -140,6 +142,7 @@ class StepOutcome(str):
 		"""
 		obj = super().__new__(cls, display)
 		obj.status = status
+		obj.outcome_status = status
 		obj.reason = reason
 		return obj
 

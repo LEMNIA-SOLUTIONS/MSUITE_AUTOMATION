@@ -536,7 +536,7 @@ def execute(ctx, step) -> StepOutcome:
 		step: Automation step document or dictionary.
 
 	Returns:
-		StepOutcome: Structured outcome (status and reason, inherits from str for display string).
+		StepOutcome: Structured outcome (outcome_status/status and reason, inherits from str for display string).
 
 	Raises:
 		Exception: On execution errors during send, update, or external dispatch.

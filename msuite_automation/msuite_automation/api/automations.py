@@ -105,12 +105,13 @@ def get_automations(search: str = "", trigger_type: str = "", enabled: str = "",
 			where creation = (select max(creation) from `tab{RUN_DOCTYPE}` where automation = r.automation)
 			and automation in %(names)s""", {"names": names}, as_dict=True):
 		entry = {"status": r.status, "at": str(r.creation)}
-		if r.status == "Failed":
+		if r.status in (RUN_STATUS_FAILED, RUN_STATUS_SKIPPED):
 			try:
 				parsed_log = json.loads(r.log or "[]")
 			except Exception:
 				parsed_log = []
-			entry["error"] = _last_run_reason(parsed_log, "error")
+			key = "error" if r.status == RUN_STATUS_FAILED else "result"
+			entry["error"] = _last_run_reason(parsed_log, key)
 		last[r.automation] = entry
 	items = []
 	for r in rows:
@@ -397,6 +398,8 @@ def _failure_text(entry) -> str:
 def _last_run_reason(log_entries: list, key: str = "error") -> str:
 	"""Extract the most recent error or skip reason from a run log.
 
+	Supports both structured outcome_status/reason log shapes and legacy string results.
+
 	Args:
 		log_entries: List of log entry dictionaries from the run.
 		key: Log entry key to inspect ("error" for failures, "result" for skips).
@@ -413,7 +416,10 @@ def _last_run_reason(log_entries: list, key: str = "error") -> str:
 	for entry in reversed(log_entries or []):
 		if isinstance(entry, dict):
 			if key == "result":
-				if entry.get("status") == RUN_STATUS_SKIPPED.lower() and entry.get("reason"):
+				outcome_status = entry.get("outcome_status")
+				if outcome_status is None and entry.get("status") in (RUN_STATUS_SKIPPED.lower(), "skip"):
+					outcome_status = entry.get("status")
+				if outcome_status == RUN_STATUS_SKIPPED.lower() and entry.get("reason"):
 					return f"{RESULT_SKIPPED_PREFIX}{entry['reason']}"[:RUN_ERROR_MAX]
 				res = str(entry.get("result") or "")
 				if res.startswith(RESULT_SKIPPED_PREFIX):
@@ -441,24 +447,6 @@ def _last_run_error(log_entries: list) -> str:
 		None.
 	"""
 	return _last_run_reason(log_entries, "error")
-
-
-def _last_run_skip_reason(log_entries: list) -> str:
-	"""Extract the most recent step skip reason from a run log.
-
-	Args:
-		log_entries: List of log entry dictionaries from the run.
-
-	Returns:
-		str: Skip reason truncated to RUN_ERROR_MAX, or empty string.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
-	return _last_run_reason(log_entries, "result")
 
 
 def _mark_delivery_failure(run) -> None:
@@ -520,12 +508,7 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 			r.log = []
 		r.creation = str(r.creation)
 		r.resume_at = str(r.resume_at) if r.resume_at else None
-		if r.status == RUN_STATUS_FAILED:
-			r["error"] = _last_run_reason(r.log, "error")
-		elif r.status == RUN_STATUS_SKIPPED:
-			r["error"] = _last_run_reason(r.log, "result")
-		else:
-			r["error"] = ""
+		r["error"] = ""
 		r["delivery_failed"] = False
 		for entry in r.log:
 			if isinstance(entry, dict) and entry.get("message"):
@@ -550,6 +533,12 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 						entry["status_error"] = cm["status_error"]
 		for r in rows:
 			_mark_delivery_failure(r)
+
+	for r in rows:
+		if r.status == RUN_STATUS_FAILED:
+			r["error"] = _last_run_reason(r.log, "error") or (DELIVERY_FAILED_DEFAULT_ERROR if r.get("delivery_failed") else "")
+		elif r.status == RUN_STATUS_SKIPPED:
+			r["error"] = _last_run_reason(r.log, "result")
 
 	return rows
 
