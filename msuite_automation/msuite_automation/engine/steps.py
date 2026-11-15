@@ -43,6 +43,7 @@ from msuite_automation.msuite_automation.constants import (
 	REQUIRE_OPT_IN_FIELD,
 	WHATSAPP_SETTINGS_DOCTYPE,
 	RESULT_SENT,
+	RESULT_SKIPPED_ALREADY_SENT,
 	RESULT_SKIPPED_DUPLICATE,
 	RESULT_SKIPPED_IG_LOGIN,
 	RESULT_SKIPPED_MENTION_UNRESOLVED,
@@ -539,7 +540,7 @@ def execute(ctx, step) -> str:
 	a, doc = ctx.automation, ctx.doc
 	if step.step_type == SEND_WHATSAPP:
 		if channels.already_sent(step.template, doc.doctype, doc.name, a.send_frequency, ignore_failed=bool(ctx.get("retrying"))):
-			return "skipped: already sent"
+			return RESULT_SKIPPED_ALREADY_SENT
 		if _is_marketing_opted_out(ctx, step):
 			return RESULT_SKIPPED_OPTED_OUT
 		if _lacks_marketing_consent(ctx, step):

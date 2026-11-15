@@ -220,6 +220,24 @@ class TestChannels(unittest.TestCase):
 		)
 		self.assertEqual(field_value(deal, "primary_contact_mobile"), "919876543210")
 
+	def test_aut124_get_deal_primary_contact_mobile_unloaded_contacts_queries_db(self):
+		from msuite_automation.msuite_automation.engine.filters import get_deal_primary_contact_mobile
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0005",
+			mobile_no="",
+		)
+		with patch("frappe.get_all", return_value=[{"mobile_no": "919123456789", "contact": "C_DB"}]) as mock_ga:
+			res = get_deal_primary_contact_mobile(deal)
+			mock_ga.assert_called_once_with(
+				"CRM Contacts",
+				filters={"parent": "CRM-DEAL-0005", "parenttype": "CRM Deal"},
+				fields=["mobile_no", "contact"],
+				order_by="is_primary desc, idx asc",
+				limit=1,
+			)
+			self.assertEqual(res, "919123456789")
+
 
 class TestAcquireLock(unittest.TestCase):
 	def _cache(self, result=None, error=None):

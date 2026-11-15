@@ -18,7 +18,6 @@ from msuite_automation.msuite_automation.constants import (
 	DATE_BASED,
 	DEAL_DOCTYPE,
 	DEAL_PRIMARY_CONTACT_MOBILE,
-	DEAL_PRIMARY_CONTACT_MOBILE_ALT,
 	DOCUMENT_EVENT,
 	EVERY_TIME,
 	FIELD_CHANGE,
@@ -142,7 +141,7 @@ class MessagingAutomation(Document):
 		"""
 		if fieldname and doctype and fieldname.startswith("sales_order.") and doctype == "Delivery Note":
 			return fieldname[len("sales_order."):], "Sales Order"
-		if fieldname and doctype and doctype == DEAL_DOCTYPE and fieldname in (DEAL_PRIMARY_CONTACT_MOBILE, DEAL_PRIMARY_CONTACT_MOBILE_ALT):
+		if fieldname and doctype and doctype == DEAL_DOCTYPE and fieldname == DEAL_PRIMARY_CONTACT_MOBILE:
 			return FIELD_MOBILE_NO, CONTACT_DOCTYPE
 		return fieldname, doctype
 

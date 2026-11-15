@@ -109,7 +109,7 @@ def get_automations(search: str = "", trigger_type: str = "", enabled: str = "",
 				parsed_log = json.loads(r.log or "[]")
 			except Exception:
 				parsed_log = []
-			entry["error"] = _last_run_error(parsed_log)
+			entry["error"] = _last_run_reason(parsed_log, "error")
 		last[r.automation] = entry
 	items = []
 	for r in rows:
@@ -372,6 +372,57 @@ def test_automation(doc, docname: str, trigger_id: str = "") -> dict:
 	return preview.dry_run(automation, target, trig.trigger_id)
 
 
+def _failure_text(entry) -> str:
+	"""Extract error or failure reason from a log entry or message record.
+
+	Checks failure_reason, then status_error, then error.
+
+	Args:
+		entry: Dictionary containing error / failure fields, or None.
+
+	Returns:
+		str: Extracted failure string, or empty string if none found.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	if not isinstance(entry, dict):
+		return ""
+	return str(entry.get("failure_reason") or entry.get("status_error") or entry.get("error") or "")
+
+
+def _last_run_reason(log_entries: list, key: str = "error") -> str:
+	"""Extract the most recent error or skip reason from a run log.
+
+	Args:
+		log_entries: List of log entry dictionaries from the run.
+		key: Log entry key to inspect ("error" for failures, "result" for skips).
+
+	Returns:
+		str: Extracted reason truncated to RUN_ERROR_MAX, or empty string.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	for entry in reversed(log_entries or []):
+		if isinstance(entry, dict):
+			if key == "result":
+				res = str(entry.get("result") or "")
+				if res.startswith(RESULT_SKIPPED_PREFIX):
+					return res[:RUN_ERROR_MAX]
+			else:
+				reason = _failure_text(entry)
+				if reason:
+					return reason[:RUN_ERROR_MAX]
+	return ""
+
+
 def _last_run_error(log_entries: list) -> str:
 	"""Extract the most recent step error message from a run log.
 
@@ -387,10 +438,7 @@ def _last_run_error(log_entries: list) -> str:
 	Side Effects:
 		None.
 	"""
-	for entry in reversed(log_entries or []):
-		if isinstance(entry, dict) and entry.get("error"):
-			return str(entry["error"])[:RUN_ERROR_MAX]
-	return ""
+	return _last_run_reason(log_entries, "error")
 
 
 def _last_run_skip_reason(log_entries: list) -> str:
@@ -408,12 +456,7 @@ def _last_run_skip_reason(log_entries: list) -> str:
 	Side Effects:
 		None.
 	"""
-	for entry in reversed(log_entries or []):
-		if isinstance(entry, dict):
-			res = str(entry.get("result") or "")
-			if res.startswith(RESULT_SKIPPED_PREFIX):
-				return res[:RUN_ERROR_MAX]
-	return ""
+	return _last_run_reason(log_entries, "result")
 
 
 def _mark_delivery_failure(run) -> None:
@@ -440,7 +483,7 @@ def _mark_delivery_failure(run) -> None:
 	run.status = RUN_STATUS_FAILED
 	run["delivery_failed"] = True
 	failed_entry = failed[-1]
-	reason = failed_entry.get("failure_reason") or failed_entry.get("status_error") or DELIVERY_FAILED_DEFAULT_ERROR
+	reason = _failure_text(failed_entry) or DELIVERY_FAILED_DEFAULT_ERROR
 	run["error"] = str(reason)[:RUN_ERROR_MAX]
 
 
@@ -475,7 +518,12 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 			r.log = []
 		r.creation = str(r.creation)
 		r.resume_at = str(r.resume_at) if r.resume_at else None
-		r["error"] = _last_run_error(r.log) if r.status == RUN_STATUS_FAILED else (_last_run_skip_reason(r.log) if r.status == RUN_STATUS_SKIPPED else "")
+		if r.status == RUN_STATUS_FAILED:
+			r["error"] = _last_run_reason(r.log, "error")
+		elif r.status == RUN_STATUS_SKIPPED:
+			r["error"] = _last_run_reason(r.log, "result")
+		else:
+			r["error"] = ""
 		r["delivery_failed"] = False
 		for entry in r.log:
 			if isinstance(entry, dict) and entry.get("message"):
@@ -494,10 +542,10 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 					cm = cm_by_name[entry["message"]]
 					if cm.get("status"):
 						entry["status"] = cm["status"]
-					reason = cm.get("failure_reason") or cm.get("status_error")
-					if reason:
-						entry["status_error"] = reason
-						entry["failure_reason"] = reason
+					if cm.get("failure_reason"):
+						entry["failure_reason"] = cm["failure_reason"]
+					elif cm.get("status_error"):
+						entry["status_error"] = cm["status_error"]
 		for r in rows:
 			_mark_delivery_failure(r)
 

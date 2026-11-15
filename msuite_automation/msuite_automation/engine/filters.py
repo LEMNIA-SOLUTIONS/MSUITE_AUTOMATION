@@ -10,7 +10,6 @@ from msuite_automation.msuite_automation.constants import (
 	DEAL_CONTACTS_CHILD_DOCTYPE,
 	DEAL_DOCTYPE,
 	DEAL_PRIMARY_CONTACT_MOBILE,
-	DEAL_PRIMARY_CONTACT_MOBILE_ALT,
 	FIELD_MOBILE_NO,
 )
 
@@ -31,9 +30,7 @@ def _get(obj, field, default=None):
 def get_deal_primary_contact_mobile(doc) -> str | None:
 	"""Fetch the mobile number of the primary contact linked to a CRM Deal.
 
-	Checks the 'CRM Contacts' child rows for an is_primary row:
-	first its own mobile_no, then the linked Contact's mobile_no.
-	Also falls back to the Deal's direct contact link if present.
+	Checks child rows (in-memory or queried from DB) then falls back to Deal.contact.
 
 	Args:
 		doc: CRM Deal document or dictionary.
@@ -47,47 +44,32 @@ def get_deal_primary_contact_mobile(doc) -> str | None:
 	Side Effects:
 		May query database for child rows or Contact document when not loaded in memory.
 	"""
-	if not doc:
-		return None
-	contacts = getattr(doc, "contacts", None)
-	if contacts is None and isinstance(doc, dict):
-		contacts = doc.get("contacts")
+	result = None
+	if doc:
+		contacts = _get(doc, "contacts")
+		primary = next((r for r in contacts if _get(r, "is_primary")), None) if contacts is not None else None
+		if not primary and contacts is None and _get(doc, "name"):
+			rows = frappe.get_all(
+				DEAL_CONTACTS_CHILD_DOCTYPE,
+				filters={"parent": _get(doc, "name"), "parenttype": DEAL_DOCTYPE},
+				fields=[FIELD_MOBILE_NO, "contact"],
+				order_by="is_primary desc, idx asc",
+				limit=1,
+			)
+			primary = rows[0] if rows else None
 
-	primary_row = None
-	if contacts:
-		for row in contacts:
-			is_pri = getattr(row, "is_primary", None) if hasattr(row, "is_primary") else (row.get("is_primary") if isinstance(row, dict) else None)
-			if is_pri:
-				primary_row = row
+		for source in (primary, {"contact": _get(doc, "contact")}):
+			if not source:
+				continue
+			mob = _get(source, FIELD_MOBILE_NO)
+			val = str(mob).strip() if mob and str(mob).strip() else None
+			if not val and _get(source, "contact"):
+				cmob = frappe.db.get_value(CONTACT_DOCTYPE, _get(source, "contact"), FIELD_MOBILE_NO)
+				val = str(cmob).strip() if cmob and str(cmob).strip() else None
+			if val:
+				result = val
 				break
-	doc_name = getattr(doc, "name", None) or (doc.get("name") if isinstance(doc, dict) else None)
-	if not primary_row and doc_name and getattr(frappe, "db", None):
-		rows = frappe.get_all(
-			DEAL_CONTACTS_CHILD_DOCTYPE,
-			filters={"parent": doc_name, "parenttype": DEAL_DOCTYPE, "is_primary": 1},
-			fields=[FIELD_MOBILE_NO, "contact"],
-			limit=1,
-		)
-		if rows:
-			primary_row = rows[0]
-
-	if primary_row:
-		mob = getattr(primary_row, FIELD_MOBILE_NO, None) if hasattr(primary_row, FIELD_MOBILE_NO) else (primary_row.get(FIELD_MOBILE_NO) if isinstance(primary_row, dict) else None)
-		if mob and str(mob).strip():
-			return str(mob).strip()
-		contact_id = getattr(primary_row, "contact", None) if hasattr(primary_row, "contact") else (primary_row.get("contact") if isinstance(primary_row, dict) else None)
-		if contact_id and getattr(frappe, "db", None):
-			contact_mob = frappe.db.get_value(CONTACT_DOCTYPE, contact_id, FIELD_MOBILE_NO)
-			if contact_mob and str(contact_mob).strip():
-				return str(contact_mob).strip()
-
-	contact_id = getattr(doc, "contact", None) or (doc.get("contact") if isinstance(doc, dict) else None)
-	if contact_id and getattr(frappe, "db", None):
-		contact_mob = frappe.db.get_value(CONTACT_DOCTYPE, contact_id, FIELD_MOBILE_NO)
-		if contact_mob and str(contact_mob).strip():
-			return str(contact_mob).strip()
-
-	return None
+	return result
 
 
 def field_value(doc, field: str):
@@ -106,7 +88,7 @@ def field_value(doc, field: str):
 	Side Effects:
 		May query linked documents if accessor requires traversal.
 	"""
-	if field in (DEAL_PRIMARY_CONTACT_MOBILE, DEAL_PRIMARY_CONTACT_MOBILE_ALT):
+	if field == DEAL_PRIMARY_CONTACT_MOBILE:
 		return get_deal_primary_contact_mobile(doc)
 	target = doc
 	if field.startswith("sales_order."):
