@@ -65,10 +65,9 @@ class TestSingleSources(unittest.TestCase):
 
 	def test_step_outcome_str_subclass_and_attributes(self):
 		self.assertEqual(C.STEP_OUTCOME_KEY, "outcome_status")
-		outcome = C.StepOutcome("skipped: no recipient", status="skipped", reason="no recipient")
+		outcome = C.StepOutcome.of("skipped", "no recipient")
 		self.assertIsInstance(outcome, str)
 		self.assertEqual(outcome, "skipped: no recipient")
-		self.assertEqual(outcome.status, "skipped")
 		self.assertEqual(outcome.outcome_status, "skipped")
 		self.assertEqual(outcome.reason, "no recipient")
 		self.assertTrue(outcome.startswith("skipped"))
@@ -76,31 +75,26 @@ class TestSingleSources(unittest.TestCase):
 	def test_step_outcome_constructors(self):
 		sent = C.step_sent()
 		self.assertEqual(sent, "sent")
-		self.assertEqual(sent.status, "sent")
 		self.assertEqual(sent.outcome_status, "sent")
 		self.assertIsNone(sent.reason)
 
 		skipped = C.step_skipped("no recipient")
 		self.assertEqual(skipped, "skipped: no recipient")
-		self.assertEqual(skipped.status, "skipped")
 		self.assertEqual(skipped.outcome_status, "skipped")
 		self.assertEqual(skipped.reason, "no recipient")
 
 		updated = C.step_updated()
 		self.assertEqual(updated, "updated")
-		self.assertEqual(updated.status, "updated")
 		self.assertEqual(updated.outcome_status, "updated")
 		self.assertIsNone(updated.reason)
 
 		added = C.step_added()
 		self.assertEqual(added, "added")
-		self.assertEqual(added.status, "added")
 		self.assertEqual(added.outcome_status, "added")
 		self.assertIsNone(added.reason)
 
 		err = C.step_error("boom")
 		self.assertEqual(err, "error: boom")
-		self.assertEqual(err.status, "error")
 		self.assertEqual(err.outcome_status, "error")
 		self.assertEqual(err.reason, "boom")
 

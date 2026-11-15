@@ -112,148 +112,114 @@ RECIPIENT_SKIP_REASONS = (
 )
 
 
+RESULT_SKIPPED_PREFIX = "skipped: "
+
+
 class StepOutcome(str):
-	"""Execution outcome of an automation step.
+	"""Execution outcome of an automation step carrying a canonical outcome_status."""
 
-	Inherits from str so existing string comparisons and JSON serialization work
-	without churn, while carrying structured .status, .outcome_status, and .reason attributes.
-	"""
-
-	status: str
 	outcome_status: str
-	reason: str | None
 
-	def __new__(cls, display: str, status: str, reason: str | None = None):
-		"""Construct a StepOutcome.
-
-		Args:
-			display: Human-readable display string ('sent', 'updated', 'skipped: ...').
-			status: Canonical outcome status ('sent', 'skipped', 'updated', 'added', 'error').
-			reason: Optional detailed skip reason or error detail.
-
-		Returns:
-			StepOutcome: String subclass instance carrying status and reason.
-
-		Raises:
-			None.
-
-		Side Effects:
-			None.
-		"""
+	def __new__(cls, display: str, outcome_status: str | None = None, **kwargs):
 		obj = super().__new__(cls, display)
-		obj.status = status
-		obj.outcome_status = status
-		obj.reason = reason
+		obj.outcome_status = outcome_status or kwargs.get("status") or display
 		return obj
+
+	@property
+	def reason(self) -> str | None:
+		"""Extract reason from display string if applicable."""
+		if self.outcome_status == STEP_STATUS_SKIPPED and self.startswith(RESULT_SKIPPED_PREFIX):
+			return self[len(RESULT_SKIPPED_PREFIX):]
+		if self.outcome_status == STEP_STATUS_ERROR and self.startswith("error: "):
+			return self[len("error: "):]
+		return None
+
+	@classmethod
+	def of(cls, status: str, reason: str | None = None) -> "StepOutcome":
+		"""Construct a StepOutcome from canonical status and optional reason."""
+		if status == STEP_STATUS_SKIPPED:
+			display = f"{RESULT_SKIPPED_PREFIX}{reason}" if reason else "skipped"
+		elif status == STEP_STATUS_ERROR:
+			display = f"error: {reason}" if reason else "error"
+		else:
+			display = status
+		return cls(display, outcome_status=status)
 
 
 def step_sent() -> StepOutcome:
-	"""Construct a successful 'sent' step outcome.
-
-	Returns:
-		StepOutcome: 'sent' outcome with status='sent' and reason=None.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
-	return StepOutcome("sent", status=STEP_STATUS_SENT, reason=None)
+	"""Construct a successful 'sent' step outcome."""
+	return StepOutcome.of(STEP_STATUS_SENT)
 
 
 def step_skipped(reason: str) -> StepOutcome:
-	"""Construct a 'skipped: <reason>' step outcome.
-
-	Args:
-		reason: Description of why the step was skipped.
-
-	Returns:
-		StepOutcome: Formatted skip outcome with status='skipped' and reason=reason.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
-	return StepOutcome(f"{RESULT_SKIPPED_PREFIX}{reason}", status=STEP_STATUS_SKIPPED, reason=reason)
+	"""Construct a 'skipped: <reason>' step outcome."""
+	return StepOutcome.of(STEP_STATUS_SKIPPED, reason)
 
 
 def step_updated() -> StepOutcome:
-	"""Construct an 'updated' step outcome.
-
-	Returns:
-		StepOutcome: 'updated' outcome with status='updated' and reason=None.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
-	return StepOutcome("updated", status=STEP_STATUS_UPDATED, reason=None)
+	"""Construct an 'updated' step outcome."""
+	return StepOutcome.of(STEP_STATUS_UPDATED)
 
 
 def step_added() -> StepOutcome:
-	"""Construct an 'added' step outcome for recipient lists.
-
-	Returns:
-		StepOutcome: 'added' outcome with status='added' and reason=None.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
-	return StepOutcome("added", status=STEP_STATUS_ADDED, reason=None)
+	"""Construct an 'added' step outcome for recipient lists."""
+	return StepOutcome.of(STEP_STATUS_ADDED)
 
 
 def step_error(reason: str) -> StepOutcome:
-	"""Construct an 'error: <reason>' step outcome.
-
-	Args:
-		reason: Error detail string.
-
-	Returns:
-		StepOutcome: 'error: <reason>' outcome with status='error' and reason=reason.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
-	return StepOutcome(f"error: {reason}", status=STEP_STATUS_ERROR, reason=reason)
+	"""Construct an 'error: <reason>' step outcome."""
+	return StepOutcome.of(STEP_STATUS_ERROR, reason)
 
 
-RESULT_SKIPPED_PREFIX = "skipped: "
 RESULT_SENT = step_sent()
 MARKETING_CATEGORY = "MARKETING"
 WHATSAPP_SETTINGS_DOCTYPE = "WhatsApp Settings"
 REQUIRE_OPT_IN_FIELD = "require_marketing_opt_in"  # WhatsApp Settings Check field
-RESULT_SKIPPED_NO_RECIPIENT = step_skipped(SKIP_REASON_NO_RECIPIENT)
-RESULT_SKIPPED_DUPLICATE = step_skipped(SKIP_REASON_DUPLICATE)
-RESULT_SKIPPED_ALREADY_SENT = step_skipped(SKIP_REASON_ALREADY_SENT)
-RESULT_SKIPPED_UNSUPPORTED_TYPE = step_skipped(SKIP_REASON_UNSUPPORTED_TYPE)
-RESULT_SKIPPED_IG_LOGIN = step_skipped(SKIP_REASON_IG_LOGIN)
-RESULT_SKIPPED_REPLY_REFUSED = step_skipped(SKIP_REASON_REPLY_REFUSED)
-RESULT_SKIPPED_MENTION_UNRESOLVED = step_skipped(SKIP_REASON_MENTION_UNRESOLVED)
-RESULT_SKIPPED_NO_AUTHOR = step_skipped(SKIP_REASON_NO_AUTHOR)
-RESULT_SKIPPED_OPTED_OUT = step_skipped(SKIP_REASON_OPTED_OUT)
-RESULT_SKIPPED_NO_CONSENT = step_skipped(SKIP_REASON_NO_CONSENT)
-RESULT_SKIPPED_NO_CONSENT_RECORD = step_skipped(SKIP_REASON_NO_CONSENT_RECORD)
-RESULT_SKIPPED_TEMPLATES_DISABLED = step_skipped(SKIP_REASON_TEMPLATES_DISABLED)
+
+# Generate RESULT_SKIPPED_* from SKIP_REASON_* (one source)
+for _name, _val in list(globals().items()):
+	if _name.startswith("SKIP_REASON_"):
+		globals()[f"RESULT_SKIPPED_{_name[len('SKIP_REASON_'):]}"] = step_skipped(_val)
 
 # Skips that indicate non-delivery due to recipient reasons (opted out, no recipient, etc.).
 # Only when all send steps encounter these reasons does the automation run become Skipped.
-RESULT_SKIPPED_RECIPIENT_REASONS = (
-	RESULT_SKIPPED_NO_RECIPIENT,
-	RESULT_SKIPPED_OPTED_OUT,
-	RESULT_SKIPPED_NO_CONSENT,
-	RESULT_SKIPPED_NO_CONSENT_RECORD,
-)
+RESULT_SKIPPED_RECIPIENT_REASONS = tuple(step_skipped(r) for r in RECIPIENT_SKIP_REASONS)
+
+
+def outcome_of(entry: dict | None) -> tuple[str | None, str | None]:
+	"""Extract canonical (outcome_status, reason) from a run log entry.
+
+	Supports both structured outcome_status/reason log entries and legacy result strings.
+	"""
+	if not isinstance(entry, dict):
+		return None, None
+
+	status = entry.get(STEP_OUTCOME_KEY)
+	reason = entry.get("reason")
+
+	if status is None:
+		res = str(entry.get("result") or "")
+		if res.startswith(RESULT_SKIPPED_PREFIX):
+			status = STEP_STATUS_SKIPPED
+			if reason is None:
+				reason = res[len(RESULT_SKIPPED_PREFIX):].strip() or None
+		elif res.startswith("error: "):
+			status = STEP_STATUS_ERROR
+			if reason is None:
+				reason = res[len("error: "):].strip() or None
+		elif res == "error":
+			status = STEP_STATUS_ERROR
+			if reason is None and entry.get("error"):
+				reason = str(entry["error"])
+		elif res in (STEP_STATUS_SENT, STEP_STATUS_UPDATED, STEP_STATUS_ADDED):
+			status = res
+
+	if status == STEP_STATUS_SKIPPED and reason is None:
+		res = str(entry.get("result") or "")
+		if res.startswith(RESULT_SKIPPED_PREFIX):
+			reason = res[len(RESULT_SKIPPED_PREFIX):].strip() or None
+
+	return status, reason
 REASON_SEND_FAILED = "send failed"
 RUN_STATUS_FAILED = "Failed"
 RUN_STATUS_SKIPPED = "Skipped"

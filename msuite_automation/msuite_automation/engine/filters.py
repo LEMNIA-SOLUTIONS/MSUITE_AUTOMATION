@@ -22,42 +22,32 @@ def normalize(v) -> str:
 	return "" if v is None else str(v).strip()
 
 
+def _clean(val) -> str | None:
+	"""Return stripped string or None if empty."""
+	if not val:
+		return None
+	s = str(val).strip()
+	return s or None
+
+
 def _get(obj, field, default=None):
 	if obj is None:
 		return default
-	val = obj.get(field) if hasattr(obj, "get") else getattr(obj, field, default)
-	return default if val is None else val
+	return obj.get(field, default) if hasattr(obj, "get") else getattr(obj, field, default)
 
 
-def get_deal_primary_contact_mobile(doc) -> str | None:
-	"""Fetch the mobile number of the primary contact linked to a CRM Deal.
-
-	When child rows are loaded in memory, picks the row where is_primary is true
-	with the lowest idx. When child rows are not loaded, queries the database
-	ordered by idx asc. If no primary contact row exists, returns None.
-
-	Args:
-		doc: CRM Deal document or dictionary.
-
-	Returns:
-		str | None: Cleaned mobile number string, or None if unresolvable.
-
-	Raises:
-		None.
-
-	Side Effects:
-		May query database for child rows or Contact document when not loaded in memory.
-	"""
+def get_deal_primary_contact_mobile(doc, field: str | None = None) -> str | None:
+	"""Fetch the mobile number of the primary contact linked to a CRM Deal."""
 	if not doc:
 		return None
 
 	contacts = _get(doc, "contacts")
-	primary = None
+	row = None
 	if contacts is not None:
 		primaries = [r for r in contacts if _get(r, "is_primary")]
 		if not primaries:
 			return None
-		primary = min(primaries, key=lambda r: cint(_get(r, "idx", 0)))
+		row = min(primaries, key=lambda r: cint(_get(r, "idx", 0)))
 	elif _get(doc, "name"):
 		rows = frappe.get_all(
 			DEAL_CONTACTS_CHILD_DOCTYPE,
@@ -66,35 +56,20 @@ def get_deal_primary_contact_mobile(doc) -> str | None:
 			order_by="is_primary desc, idx asc",
 			limit=1,
 		)
-		primary = rows[0] if rows else None
+		row = rows[0] if rows else None
 
-	if not primary:
+	if not row:
 		return None
 
-	mob = _get(primary, FIELD_MOBILE_NO)
-	val = str(mob).strip() if mob and str(mob).strip() else None
-	if not val and _get(primary, "contact"):
-		cmob = frappe.db.get_value(CONTACT_DOCTYPE, _get(primary, "contact"), FIELD_MOBILE_NO)
-		val = str(cmob).strip() if cmob and str(cmob).strip() else None
+	val = _clean(_get(row, FIELD_MOBILE_NO))
+	if not val and _get(row, "contact"):
+		cmob = frappe.db.get_value(CONTACT_DOCTYPE, _get(row, "contact"), FIELD_MOBILE_NO)
+		val = _clean(cmob)
 	return val
 
 
 def _resolve_delivery_note_sales_order(doc, field: str):
-	"""Resolve sales_order.<fieldname> for Delivery Note via linked Sales Order.
-
-	Args:
-		doc: Delivery Note document or dictionary.
-		field: Compound field accessor (e.g. sales_order.customer_name).
-
-	Returns:
-		Any: Field value from linked Sales Order or None.
-
-	Raises:
-		None.
-
-	Side Effects:
-		May query database to fetch linked Sales Order.
-	"""
+	"""Resolve sales_order.<fieldname> for Delivery Note via linked Sales Order."""
 	prefix = "sales_order."
 	subfield = field[len(prefix):] if field.startswith(prefix) else field
 	so = get_linked_sales_order(doc)
@@ -109,12 +84,12 @@ def _resolve_delivery_note_sales_order(doc, field: str):
 # ── Module-level virtual-field resolver table (Task 5 / D8) ─────────────────
 VIRTUAL_FIELD_RESOLVERS = {
 	(DEAL_DOCTYPE, DEAL_PRIMARY_CONTACT_MOBILE): {
-		"resolve": lambda doc, field: get_deal_primary_contact_mobile(doc),
+		"resolve": get_deal_primary_contact_mobile,
 		"is_phone": True,
 		"target": (CONTACT_DOCTYPE, FIELD_MOBILE_NO),
 		"field_meta": {
 			"fieldname": DEAL_PRIMARY_CONTACT_MOBILE,
-			"label": _("Primary Contact Mobile"),
+			"label": "Primary Contact Mobile",
 			"fieldtype": "Data",
 			"options": "Phone",
 			"reqd": 0,
@@ -130,82 +105,42 @@ VIRTUAL_FIELD_RESOLVERS = {
 
 
 def get_virtual_field_resolver(doctype: str | None, field: str) -> dict | None:
-	"""Look up a virtual field resolver entry for (doctype, field).
-
-	Args:
-		doctype: DocType name or None.
-		field: Field name.
-
-	Returns:
-		dict | None: Resolver dictionary from VIRTUAL_FIELD_RESOLVERS or None.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
+	"""Look up a virtual field resolver entry for (doctype, field)."""
 	if not field:
 		return None
 	if doctype and (doctype, field) in VIRTUAL_FIELD_RESOLVERS:
 		return VIRTUAL_FIELD_RESOLVERS[(doctype, field)]
-	if doctype == "Delivery Note" and field.startswith("sales_order."):
-		return VIRTUAL_FIELD_RESOLVERS.get(("Delivery Note", "sales_order.*"))
 	if not doctype:
-		if field == DEAL_PRIMARY_CONTACT_MOBILE:
-			return VIRTUAL_FIELD_RESOLVERS.get((DEAL_DOCTYPE, DEAL_PRIMARY_CONTACT_MOBILE))
-		if field.startswith("sales_order."):
-			return VIRTUAL_FIELD_RESOLVERS.get(("Delivery Note", "sales_order.*"))
+		for (dt, f), entry in VIRTUAL_FIELD_RESOLVERS.items():
+			if f == field:
+				return entry
+	for (dt, _pattern), entry in VIRTUAL_FIELD_RESOLVERS.items():
+		prefix = entry.get("prefix")
+		if prefix and (not doctype or dt == doctype) and field.startswith(prefix):
+			return entry
 	return None
 
 
 def resolve_virtual_phone(doc) -> str | None:
-	"""Resolve recipient phone number from virtual fields registered in VIRTUAL_FIELD_RESOLVERS.
-
-	Args:
-		doc: Trigger document or payload dictionary.
-
-	Returns:
-		str | None: Raw phone string resolved from a registered virtual field, or None.
-
-	Raises:
-		None.
-
-	Side Effects:
-		May query database via registered field resolver.
-	"""
+	"""Resolve recipient phone number from virtual fields registered in VIRTUAL_FIELD_RESOLVERS."""
 	if not doc:
 		return None
-	doctype = getattr(doc, "doctype", None) or (doc.get("doctype") if hasattr(doc, "get") else None)
+	doctype = _get(doc, "doctype")
 	if not doctype:
 		return None
 	for (dt, field), entry in VIRTUAL_FIELD_RESOLVERS.items():
 		if dt == doctype and entry.get("is_phone"):
 			val = field_value(doc, field)
 			if val:
-				return str(val).strip()
+				return _clean(val)
 	return None
 
 
 def field_value(doc, field: str):
-	"""Value of `field` on doc, reading virtual fields from VIRTUAL_FIELD_RESOLVERS.
-
-	Args:
-		doc: Document or dictionary to read from.
-		field: Name of the field to read, or compound field accessor.
-
-	Returns:
-		Any: Field value or None if absent.
-
-	Raises:
-		None.
-
-	Side Effects:
-		May query linked documents if accessor requires traversal.
-	"""
+	"""Value of `field` on doc, reading virtual fields from VIRTUAL_FIELD_RESOLVERS."""
 	if not doc or not field:
 		return None
-	doc_dt = getattr(doc, "doctype", None) or (doc.get("doctype") if hasattr(doc, "get") else None)
+	doc_dt = _get(doc, "doctype")
 	resolver = get_virtual_field_resolver(doc_dt, field)
 	if resolver and resolver.get("resolve"):
 		return resolver["resolve"](doc, field)
@@ -284,7 +219,7 @@ def get_linked_sales_order(doc) -> Document | dict | None:
 						{"parent": docname, "against_sales_order": ["is", "set"]},
 						"against_sales_order",
 					)
-			except Exception:
+			except (frappe.DoesNotExistError, frappe.DataError):
 				pass
 
 	if so_name and hasattr(frappe, "db") and frappe.db and hasattr(frappe.db, "exists"):
@@ -293,10 +228,10 @@ def get_linked_sales_order(doc) -> Document | dict | None:
 				so_doc = frappe.get_doc("Sales Order", so_name)
 				try:
 					setattr(doc, "_linked_sales_order", so_doc)
-				except Exception:
+				except (AttributeError, TypeError):
 					pass
 				return so_doc
-		except Exception:
+		except (frappe.DoesNotExistError, frappe.DataError):
 			pass
 
 	return None

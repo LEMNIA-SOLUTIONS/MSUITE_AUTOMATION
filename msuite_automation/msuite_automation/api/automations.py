@@ -23,6 +23,7 @@ from msuite_automation.msuite_automation.constants import (
 	RESULT_SKIPPED_PREFIX, RUN_DOCTYPE, RUN_ERROR_MAX,
 	RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, SCHEDULE,
 	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
+	STEP_OUTCOME_KEY, STEP_STATUS_SKIPPED, outcome_of, step_skipped,
 )
 from msuite_automation.msuite_automation.engine import preview
 from msuite_automation.msuite_automation.engine.filters import VIRTUAL_FIELD_RESOLVERS
@@ -283,7 +284,10 @@ def get_doctype_fields(doctype: str) -> list[dict]:
 			if entry.get("target_doctype") and entry.get("prefix"):
 				out += _fields(entry["target_doctype"], entry["prefix"], entry.get("label_prefix", ""))
 			elif entry.get("field_meta"):
-				out.append(entry["field_meta"])
+				fm = dict(entry["field_meta"])
+				if "label" in fm:
+					fm["label"] = _(fm["label"])
+				out.append(fm)
 	return out
 
 
@@ -396,34 +400,17 @@ def _failure_text(entry) -> str:
 
 
 def _last_run_reason(log_entries: list, key: str = "error") -> str:
-	"""Extract the most recent error or skip reason from a run log.
-
-	Supports both structured outcome_status/reason log shapes and legacy string results.
-
-	Args:
-		log_entries: List of log entry dictionaries from the run.
-		key: Log entry key to inspect ("error" for failures, "result" for skips).
-
-	Returns:
-		str: Extracted reason truncated to RUN_ERROR_MAX, or empty string.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
+	"""Extract the most recent error or skip reason from a run log."""
 	for entry in reversed(log_entries or []):
 		if isinstance(entry, dict):
 			if key == "result":
-				outcome_status = entry.get("outcome_status")
-				if outcome_status is None and entry.get("status") in (RUN_STATUS_SKIPPED.lower(), "skip"):
-					outcome_status = entry.get("status")
-				if outcome_status == RUN_STATUS_SKIPPED.lower() and entry.get("reason"):
-					return f"{RESULT_SKIPPED_PREFIX}{entry['reason']}"[:RUN_ERROR_MAX]
-				res = str(entry.get("result") or "")
-				if res.startswith(RESULT_SKIPPED_PREFIX):
-					return res[:RUN_ERROR_MAX]
+				status, reason = outcome_of(entry)
+				if status == STEP_STATUS_SKIPPED:
+					if reason:
+						return step_skipped(reason)[:RUN_ERROR_MAX]
+					res = str(entry.get("result") or "")
+					if res.startswith(RESULT_SKIPPED_PREFIX):
+						return res[:RUN_ERROR_MAX]
 			else:
 				reason = _failure_text(entry)
 				if reason:
@@ -511,8 +498,14 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 		r["error"] = ""
 		r["delivery_failed"] = False
 		for entry in r.log:
-			if isinstance(entry, dict) and entry.get("message"):
-				msg_names.add(entry["message"])
+			if isinstance(entry, dict):
+				if entry.get("message"):
+					msg_names.add(entry["message"])
+				status, reason = outcome_of(entry)
+				if status is not None:
+					entry[STEP_OUTCOME_KEY] = status
+				if reason is not None:
+					entry["reason"] = reason
 
 	if msg_names:
 		cm_rows = frappe.get_all(

@@ -17,8 +17,9 @@ from msuite_automation.msuite_automation.constants import (
 	RECIPIENT_SKIP_REASONS, RESULT_SKIPPED_PREFIX, RESULT_SKIPPED_RECIPIENT_REASONS, RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX,
 	RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, RUN_STATUS_WAITING,
 	SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
-	STEP_STATUS_ADDED, STEP_STATUS_ERROR, STEP_STATUS_SKIPPED, STEP_STATUS_UPDATED,
+	STEP_OUTCOME_KEY, STEP_STATUS_ADDED, STEP_STATUS_ERROR, STEP_STATUS_SKIPPED, STEP_STATUS_UPDATED,
 	STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
+	outcome_of,
 )
 from msuite_automation.msuite_automation.engine import channels
 from msuite_automation.msuite_automation.engine import steps as S
@@ -262,8 +263,8 @@ def _node_executor(automation, graph, ctx, log):
 		try:
 			outcome = S.execute(node_ctx, step)
 			entry["result"] = str(outcome)
-			if hasattr(outcome, "status") and outcome.status:
-				entry["outcome_status"] = outcome.status
+			if hasattr(outcome, STEP_OUTCOME_KEY) and getattr(outcome, STEP_OUTCOME_KEY):
+				entry[STEP_OUTCOME_KEY] = getattr(outcome, STEP_OUTCOME_KEY)
 			if hasattr(outcome, "reason") and outcome.reason is not None:
 				entry["reason"] = outcome.reason
 			path["retry_count"] = 0
@@ -277,7 +278,7 @@ def _node_executor(automation, graph, ctx, log):
 				return WAIT_SIGNAL
 			path["retry_count"] = 0
 			entry["result"], entry["error"] = "error", str(e)[:RUN_ERROR_MAX]
-			entry["outcome_status"] = STEP_STATUS_ERROR
+			entry[STEP_OUTCOME_KEY] = STEP_STATUS_ERROR
 			if getattr(e, "channel_message", None):
 				entry["message"] = e.channel_message
 			frappe.log_error(title=f"Messaging Automation {automation.name} step {node_id} failed")
@@ -288,34 +289,16 @@ def _node_executor(automation, graph, ctx, log):
 def is_recipient_skip(entry: dict) -> bool:
 	"""Check if a send step log entry represents a recipient-reason skip.
 
-	Supports both new structured outcome_status/reason log shapes and legacy
-	status/result shapes. Only recipient reasons (no recipient, opted out,
+	Supports both structured outcome_status/reason log shapes and legacy
+	result shapes. Only recipient reasons (no recipient, opted out,
 	no consent, no consent record) count as Skipped. A Channel Message's
 	delivery status (e.g. 'delivered') in entry['status'] does not affect outcome logic.
-
-	Args:
-		entry: Log entry dictionary.
-
-	Returns:
-		bool: True if the entry is a skip due to recipient reasons.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
 	"""
 	if not isinstance(entry, dict):
 		return False
-	outcome_status = entry.get("outcome_status")
-	if outcome_status is None:
-		legacy_status = entry.get("status")
-		if legacy_status in (STEP_STATUS_SKIPPED, "skip"):
-			outcome_status = STEP_STATUS_SKIPPED
-	if outcome_status == STEP_STATUS_SKIPPED or getattr(entry.get("result"), "status", None) == STEP_STATUS_SKIPPED:
-		reason = entry.get("reason") or getattr(entry.get("result"), "reason", None)
-		if reason is not None:
-			return reason in RECIPIENT_SKIP_REASONS
+	status, reason = outcome_of(entry)
+	if status == STEP_STATUS_SKIPPED and reason is not None:
+		return reason in RECIPIENT_SKIP_REASONS
 	# Fallback for stored run logs written before this change
 	return entry.get("result") in RESULT_SKIPPED_RECIPIENT_REASONS
 
@@ -326,28 +309,15 @@ def has_other_successful_work(log: list) -> bool:
 	A run that successfully updated a field or added a recipient to a list performed
 	meaningful state modifications and must stay Completed, even if all send steps
 	were recipient-skipped.
-
-	Args:
-		log: List of execution log entry dictionaries.
-
-	Returns:
-		bool: True if an Update Field or Add to List step succeeded.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
 	"""
 	for entry in log:
 		if not isinstance(entry, dict):
 			continue
 		st = entry.get("step_type")
-		res = entry.get("result")
-		status = entry.get("outcome_status") or entry.get("status")
-		if st == UPDATE_FIELD and (res == "updated" or status == STEP_STATUS_UPDATED):
+		status, _ = outcome_of(entry)
+		if st == UPDATE_FIELD and status == STEP_STATUS_UPDATED:
 			return True
-		if st == ADD_TO_LIST and (res == "added" or status == STEP_STATUS_ADDED):
+		if st == ADD_TO_LIST and status == STEP_STATUS_ADDED:
 			return True
 	return False
 
@@ -421,7 +391,7 @@ def _walk(automation, run, doc, ctx_data, paths):
 	counter = itertools.count(len(paths) + 1)
 	paths = advance(graph, paths, _node_executor(automation, graph, ctx, log), lambda: f"p{next(counter)}")
 	log.extend({"path_id": p["path_id"], "node_id": p["node_id"], "step_id": p["node_id"], "result": "error", "error": p.pop("error"),
-		"outcome_status": STEP_STATUS_ERROR,
+		STEP_OUTCOME_KEY: STEP_STATUS_ERROR,
 		"at": str(now_datetime())} for p in paths if p.get("error"))
 	_persist(run, paths, log)
 
