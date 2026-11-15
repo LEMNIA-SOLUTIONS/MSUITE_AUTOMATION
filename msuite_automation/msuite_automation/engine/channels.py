@@ -15,8 +15,19 @@ from frappe.utils import cint, today
 
 from msuite_core.utils.phone import format_number
 from msuite_inbox.inbox.services.outbound import send_to_phone
-from msuite_automation.msuite_automation.constants import DEDUPE_LOCK_TTL_SECONDS, ONCE_PER_DAY, ONCE_PER_DOCUMENT
-from msuite_automation.msuite_automation.engine.filters import ALIASES, _get, field_value, get_linked_sales_order
+from msuite_automation.msuite_automation.constants import (
+	DEDUPE_LOCK_TTL_SECONDS,
+	ONCE_PER_DAY,
+	ONCE_PER_DOCUMENT,
+)
+from msuite_automation.msuite_automation.engine.filters import (
+	ALIASES,
+	_get,
+	field_value,
+	get_deal_primary_contact_mobile,
+	get_linked_sales_order,
+	resolve_virtual_phone,
+)
 from msuite_core.constants import LOGGER_NAME
 from msuite_core.utils.phone import clean_mobile
 
@@ -190,7 +201,24 @@ def _lead_recipient_data(doc) -> dict:
 
 
 def resolve_phone(automation, doc):
+	"""Resolve recipient phone number from automation settings, document fields, or fallbacks.
+
+	Args:
+		automation: Messaging Automation configuration (or effective settings dict).
+		doc: Trigger document or payload dictionary.
+
+	Returns:
+		str | None: Cleaned and formatted phone number string without spaces, or None.
+
+	Raises:
+		None.
+
+	Side Effects:
+		May query database via virtual field resolvers or Contact records when applicable.
+	"""
 	raw = _first(doc, [_get(automation, "phone_field"), *PHONE_FALLBACK])
+	if not raw:
+		raw = resolve_virtual_phone(doc)
 	if not raw:
 		return None
 	cleaned, error = clean_mobile(raw)

@@ -164,6 +164,162 @@ class TestChannels(unittest.TestCase):
 		channels.send_whatsapp(a, step, doc)
 		self.assertNotIn("phone_number_id", send.call_args.kwargs["payload"])
 
+	def test_aut124_resolve_phone_deal_primary_contact_child_row(self):
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0001",
+			mobile_no="",
+			phone="",
+			contacts=[
+				frappe._dict(is_primary=0, mobile_no="919111111111", contact="C1"),
+				frappe._dict(is_primary=1, mobile_no="919876543210", contact="C2"),
+			],
+		)
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		self.assertEqual(channels.resolve_phone(a, deal), "919876543210")
+		# Also works when phone_field is default/empty
+		a_default = frappe._dict(name="MA-1", phone_field=None)
+		self.assertEqual(channels.resolve_phone(a_default, deal), "919876543210")
+
+	def test_aut124_resolve_phone_deal_primary_contact_linked_contact(self):
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0002",
+			mobile_no="",
+			phone="",
+			contacts=[
+				frappe._dict(is_primary=1, mobile_no="", contact="C_PRIMARY"),
+			],
+		)
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		with patch("frappe.db.get_value", return_value="919999888877") as mock_gv:
+			res = channels.resolve_phone(a, deal)
+			mock_gv.assert_called_with("Contact", "C_PRIMARY", "mobile_no")
+			self.assertEqual(res, "919999888877")
+
+	def test_aut124_resolve_phone_deal_no_contacts_returns_none(self):
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0003",
+			mobile_no="",
+			phone="",
+			contacts=[],
+		)
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		self.assertIsNone(channels.resolve_phone(a, deal))
+
+	def test_aut124_field_value_deal_primary_contact_mobile(self):
+		from msuite_automation.msuite_automation.engine.filters import field_value
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0004",
+			mobile_no="",
+			contacts=[
+				frappe._dict(is_primary=1, mobile_no="919876543210", contact="C2"),
+			],
+		)
+		self.assertEqual(field_value(deal, "primary_contact_mobile"), "919876543210")
+
+	def test_aut124_get_deal_primary_contact_mobile_unloaded_contacts_queries_db(self):
+		from msuite_automation.msuite_automation.engine.filters import get_deal_primary_contact_mobile
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0005",
+			mobile_no="",
+		)
+		with patch("frappe.get_all", return_value=[{"mobile_no": "919123456789", "contact": "C_DB"}]) as mock_ga:
+			res = get_deal_primary_contact_mobile(deal)
+			mock_ga.assert_called_once_with(
+				"CRM Contacts",
+				filters={"parent": "CRM-DEAL-0005", "parenttype": "CRM Deal", "is_primary": 1},
+				fields=["mobile_no", "contact"],
+				order_by="idx asc",
+				limit=1,
+			)
+			self.assertEqual(res, "919123456789")
+
+	def test_deal_db_only_non_primary_contacts_returns_none(self):
+		"""Verify that unloaded Deal contacts with only non-primary DB rows returns None."""
+		from msuite_automation.msuite_automation.engine.filters import get_deal_primary_contact_mobile
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0006",
+			mobile_no="",
+		)
+		with patch("frappe.get_all", return_value=[]) as mock_ga:
+			res = get_deal_primary_contact_mobile(deal)
+			mock_ga.assert_called_once_with(
+				"CRM Contacts",
+				filters={"parent": "CRM-DEAL-0006", "parenttype": "CRM Deal", "is_primary": 1},
+				fields=["mobile_no", "contact"],
+				order_by="idx asc",
+				limit=1,
+			)
+			self.assertIsNone(res)
+
+	def test_deal_db_two_primary_contacts_picks_lowest_idx(self):
+		"""Verify that unloaded Deal contacts query orders by idx asc to pick lowest idx."""
+		from msuite_automation.msuite_automation.engine.filters import get_deal_primary_contact_mobile
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0007",
+			mobile_no="",
+		)
+		with patch("frappe.get_all", return_value=[{"mobile_no": "919876543211", "contact": "C1"}]) as mock_ga:
+			res = get_deal_primary_contact_mobile(deal)
+			mock_ga.assert_called_once_with(
+				"CRM Contacts",
+				filters={"parent": "CRM-DEAL-0007", "parenttype": "CRM Deal", "is_primary": 1},
+				fields=["mobile_no", "contact"],
+				order_by="idx asc",
+				limit=1,
+			)
+			self.assertEqual(res, "919876543211")
+
+	def test_deal_two_primary_contacts_picks_lowest_idx(self):
+		"""Verify that a Deal with two is_primary child rows picks the one with the lowest idx."""
+		from msuite_automation.msuite_automation.engine.filters import field_value
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0010",
+			contacts=[
+				frappe._dict(is_primary=1, idx=3, mobile_no="919876543213", contact="C3"),
+				frappe._dict(is_primary=1, idx=1, mobile_no="919876543211", contact="C1"),
+				frappe._dict(is_primary=0, idx=2, mobile_no="919876543212", contact="C2"),
+			],
+		)
+		self.assertEqual(field_value(deal, "primary_contact_mobile"), "919876543211")
+		a = frappe._dict(name="MA-1", phone_field=None)
+		self.assertEqual(channels.resolve_phone(a, deal), "919876543211")
+
+	def test_deal_no_primary_contacts_returns_none(self):
+		"""Verify that a Deal with no is_primary child rows returns None and does not fall back to Deal.contact."""
+		from msuite_automation.msuite_automation.engine.filters import field_value
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0011",
+			contact="C_DEAL_FALLBACK",
+			contacts=[
+				frappe._dict(is_primary=0, idx=1, mobile_no="919876543210", contact="C_NON_PRIMARY"),
+			],
+		)
+		self.assertIsNone(field_value(deal, "primary_contact_mobile"))
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		self.assertIsNone(channels.resolve_phone(a, deal))
+
+	def test_virtual_field_resolvers_table_defined(self):
+		"""Verify that VIRTUAL_FIELD_RESOLVERS is defined at module level in engine.filters."""
+		from msuite_automation.msuite_automation.engine.filters import VIRTUAL_FIELD_RESOLVERS
+		self.assertIn(("CRM Deal", "primary_contact_mobile"), VIRTUAL_FIELD_RESOLVERS)
+		self.assertIn(("Delivery Note", "sales_order.*"), VIRTUAL_FIELD_RESOLVERS)
+
+	def test_resolve_phone_has_no_deal_specific_branch(self):
+		"""Verify that channels.resolve_phone has no hardcoded Deal branch and reads the table."""
+		import inspect
+		source = inspect.getsource(channels.resolve_phone)
+		self.assertNotIn("DEAL_DOCTYPE", source)
+		self.assertNotIn("CRM Deal", source)
+
 
 class TestAcquireLock(unittest.TestCase):
 	def _cache(self, result=None, error=None):

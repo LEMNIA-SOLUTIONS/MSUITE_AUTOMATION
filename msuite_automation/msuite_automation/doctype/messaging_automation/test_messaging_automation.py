@@ -225,6 +225,15 @@ class TestControllerValidation(unittest.TestCase):
 		with self.assertRaisesRegex(frappe.ValidationError, "not a valid email field"):
 			d_em_bad.insert(ignore_permissions=True, ignore_links=True)
 
+		# CRM Deal with primary_contact_mobile -> accepted
+		d_deal_ok = self._doc(
+			triggers=[{"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "CRM Deal", "doc_event": "After Save"}],
+			steps=[{"step_id": "w1", "step_type": "Send WhatsApp", "template": "tpl_x", "send_to": '{"CRM Deal": "primary_contact_mobile"}'}],
+			edges=[{"source_id": "t1", "target_id": "w1"}],
+		)
+		d_deal_ok.insert(ignore_permissions=True, ignore_links=True)
+		self.assertTrue(d_deal_ok.name)
+
 	def test_update_value_required_field_validation(self):
 		"""Update Field rejects blank value for required target field, allows for optional."""
 		# Required field (description on ToDo) with blank value -> rejected

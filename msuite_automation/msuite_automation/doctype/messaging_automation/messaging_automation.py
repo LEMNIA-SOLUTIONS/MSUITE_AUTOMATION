@@ -14,10 +14,14 @@ from frappe.model.document import Document
 
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
+	CONTACT_DOCTYPE,
 	DATE_BASED,
+	DEAL_DOCTYPE,
+	DEAL_PRIMARY_CONTACT_MOBILE,
 	DOCUMENT_EVENT,
 	EVERY_TIME,
 	FIELD_CHANGE,
+	FIELD_MOBILE_NO,
 	IF_ELSE,
 	OFFSET_DAYS_MAX,
 	OFFSET_DAYS_MIN,
@@ -29,6 +33,7 @@ from msuite_automation.msuite_automation.constants import (
 	SWITCH,
 	UPDATE_FIELD,
 )
+from msuite_automation.msuite_automation.engine.filters import get_virtual_field_resolver
 from msuite_automation.msuite_automation.engine.graph import (
 	Graph,
 	_to_int,
@@ -120,10 +125,10 @@ class MessagingAutomation(Document):
 
 	@staticmethod
 	def _resolve_doctype_field(fieldname, doctype):
-		"""Resolve fieldname and DocType, handling prefixes like sales_order. on Delivery Note.
+		"""Resolve fieldname and DocType using the virtual field resolver table.
 
 		Args:
-			fieldname: Name of the field, possibly prefixed.
+			fieldname: Name of the field, possibly prefixed or virtual.
 			doctype: Name of the DocType.
 
 		Returns:
@@ -135,8 +140,17 @@ class MessagingAutomation(Document):
 		Side Effects:
 			None.
 		"""
-		if fieldname and doctype and fieldname.startswith("sales_order.") and doctype == "Delivery Note":
-			return fieldname[len("sales_order."):], "Sales Order"
+		if not fieldname or not doctype:
+			return fieldname, doctype
+		resolver_entry = get_virtual_field_resolver(doctype, fieldname)
+		if resolver_entry:
+			if resolver_entry.get("target"):
+				target_dt, target_field = resolver_entry["target"]
+				return target_field, target_dt
+			if resolver_entry.get("prefix") and resolver_entry.get("target_doctype"):
+				prefix = resolver_entry["prefix"]
+				if fieldname.startswith(prefix):
+					return fieldname[len(prefix):], resolver_entry["target_doctype"]
 		return fieldname, doctype
 
 	@classmethod
