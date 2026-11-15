@@ -14,10 +14,15 @@ from frappe.model.document import Document
 
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
+	CONTACT_DOCTYPE,
 	DATE_BASED,
+	DEAL_DOCTYPE,
+	DEAL_PRIMARY_CONTACT_MOBILE,
+	DEAL_PRIMARY_CONTACT_MOBILE_ALT,
 	DOCUMENT_EVENT,
 	EVERY_TIME,
 	FIELD_CHANGE,
+	FIELD_MOBILE_NO,
 	IF_ELSE,
 	OFFSET_DAYS_MAX,
 	OFFSET_DAYS_MIN,
@@ -137,6 +142,8 @@ class MessagingAutomation(Document):
 		"""
 		if fieldname and doctype and fieldname.startswith("sales_order.") and doctype == "Delivery Note":
 			return fieldname[len("sales_order."):], "Sales Order"
+		if fieldname and doctype and doctype == DEAL_DOCTYPE and fieldname in (DEAL_PRIMARY_CONTACT_MOBILE, DEAL_PRIMARY_CONTACT_MOBILE_ALT):
+			return FIELD_MOBILE_NO, CONTACT_DOCTYPE
 		return fieldname, doctype
 
 	@classmethod

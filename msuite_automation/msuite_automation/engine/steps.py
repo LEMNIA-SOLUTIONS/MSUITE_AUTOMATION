@@ -49,6 +49,7 @@ from msuite_automation.msuite_automation.constants import (
 	RESULT_SKIPPED_NO_AUTHOR,
 	RESULT_SKIPPED_NO_CONSENT,
 	RESULT_SKIPPED_NO_CONSENT_RECORD,
+	RESULT_SKIPPED_NO_RECIPIENT,
 	RESULT_SKIPPED_OPTED_OUT,
 	RESULT_SKIPPED_PREFIX,
 	RESULT_SKIPPED_REPLY_REFUSED,
@@ -105,7 +106,7 @@ def _send(ctx, step, channel, fn):
 	if lock:
 		try:
 			if not channels.acquire_lock(lock):
-				return "skipped: duplicate"
+				return RESULT_SKIPPED_DUPLICATE
 		except channels.LockUnavailable as e:
 			raise channels.SendRetry("transient", f"duplicate-send guard unavailable: {e}") from e
 	try:
@@ -132,7 +133,7 @@ def _send(ctx, step, channel, fn):
 			msg_name = ok.get("message")
 		if msg_name and getattr(ctx, "entry", None) is not None and isinstance(ctx.entry, dict):
 			ctx.entry["message"] = msg_name
-	return "sent" if ok else "skipped: no recipient"
+	return RESULT_SENT if ok else RESULT_SKIPPED_NO_RECIPIENT
 
 
 def update_value(doc, step):
@@ -520,7 +521,21 @@ def send_ig_consent_template(ctx, step) -> str:
 
 
 def execute(ctx, step) -> str:
-	"""Run one non-control step; returns a short result string. Raises on error."""
+	"""Run one non-control step; returns a short result string.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, value, etc.
+		step: Automation step document or dictionary.
+
+	Returns:
+		str: Execution outcome string ('sent', 'updated', 'added', or a 'skipped: ...' reason).
+
+	Raises:
+		Exception: On execution errors during send, update, or external dispatch.
+
+	Side Effects:
+		Dispatches messages across channels, updates document fields in DB/memory, or adds recipients to lists.
+	"""
 	a, doc = ctx.automation, ctx.doc
 	if step.step_type == SEND_WHATSAPP:
 		if channels.already_sent(step.template, doc.doctype, doc.name, a.send_frequency, ignore_failed=bool(ctx.get("retrying"))):
@@ -532,7 +547,7 @@ def execute(ctx, step) -> str:
 		if step.delivery_mode == "Bulk campaign":
 			phone = channels.resolve_phone(a, doc)
 			if not phone:
-				return "skipped: no recipient"
+				return RESULT_SKIPPED_NO_RECIPIENT
 			res = channels.dispatch_bulk(a, step, doc, phone, channels.bulk_body_params(a, step, doc))
 			return "sent" if res.get("status") == "success" else f"error: {res.get('reason')}"
 		return _send(ctx, step, "wa", lambda: channels.send_whatsapp(a, step, doc, phone=ctx.get("phone")))
@@ -548,7 +563,7 @@ def execute(ctx, step) -> str:
 	if step.step_type == ADD_TO_LIST:
 		phone = channels.resolve_phone(a, doc)
 		if not phone:
-			return "skipped: no recipient"
+			return RESULT_SKIPPED_NO_RECIPIENT
 		return "added" if channels.add_to_list(step.recipient_list, phone, doc) else "skipped: already in list"
 	if step.step_type == SEND_IG_PUBLIC_REPLY:
 		return send_ig_public_reply(ctx, step)

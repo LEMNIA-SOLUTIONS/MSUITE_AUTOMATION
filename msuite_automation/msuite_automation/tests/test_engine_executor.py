@@ -6,7 +6,19 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import add_to_date, now_datetime
 
-from msuite_automation.msuite_automation.constants import RUN_DOCTYPE
+from msuite_automation.msuite_automation.constants import (
+	RESULT_SENT,
+	RESULT_SKIPPED_ALREADY_SENT,
+	RESULT_SKIPPED_DUPLICATE,
+	RESULT_SKIPPED_NO_CONSENT,
+	RESULT_SKIPPED_NO_CONSENT_RECORD,
+	RESULT_SKIPPED_NO_RECIPIENT,
+	RESULT_SKIPPED_OPTED_OUT,
+	RESULT_SKIPPED_RECIPIENT_REASONS,
+	RUN_DOCTYPE,
+	RUN_STATUS_COMPLETED,
+	RUN_STATUS_SKIPPED,
+)
 from msuite_automation.msuite_automation.engine import channels, executor
 
 CH = "msuite_automation.msuite_automation.engine.channels"
@@ -207,6 +219,158 @@ class TestGraphRun(unittest.TestCase):
 		name = make([sms("s")], [("t1", "", "s")], send_frequency="Once per document")
 		self.assertIsNone(executor.run_automation(name, "t1", "ToDo", todo()))
 		mock_release.assert_not_called()
+
+	def test_aut124_duplicate_only_sends_stay_completed(self, *_):
+		"""Verify that a run whose send steps were all skipped due to duplication stays Completed.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Completed.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+		log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": RESULT_SKIPPED_DUPLICATE}]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
+
+	def test_aut124_already_sent_only_sends_stay_completed(self, *_):
+		"""Verify that a run whose send steps were all skipped because already sent stays Completed.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Completed.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+		log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": RESULT_SKIPPED_ALREADY_SENT}]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
+
+	def test_aut124_no_recipient_only_sends_mark_run_skipped(self, *_):
+		"""Verify that a run whose send steps were all skipped due to no recipient is marked Skipped.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Skipped.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+		log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": RESULT_SKIPPED_NO_RECIPIENT}]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_SKIPPED)
+
+	def test_aut124_mix_no_recipient_and_sent_stays_completed(self, *_):
+		"""Verify that a run with a mix of no-recipient skip and sent step stays Completed.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Completed.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s2", "status": "Ended"}]
+		log = [
+			{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": RESULT_SENT},
+			{"path_id": "p1", "node_id": "s2", "step_type": "Send Email", "result": RESULT_SKIPPED_NO_RECIPIENT},
+		]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
+
+	def test_aut124_all_recipient_skip_reasons_mark_run_skipped(self, *_):
+		"""Verify that every skip reason in RESULT_SKIPPED_RECIPIENT_REASONS marks run as Skipped.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Skipped for each recipient skip reason.
+		"""
+		for skip_reason in RESULT_SKIPPED_RECIPIENT_REASONS:
+			with self.subTest(skip_reason=skip_reason):
+				run = frappe.get_doc({
+					"doctype": RUN_DOCTYPE,
+					"automation": "test_auto",
+					"trigger_id": "t1",
+					"status": "Running",
+					"reference_doctype": "ToDo",
+					"reference_name": "TODO-1",
+				})
+				run.flags.ignore_links = True
+				paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+				log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": skip_reason}]
+				with patch.object(run, "save"):
+					executor._persist(run, paths, log)
+				self.assertEqual(run.status, RUN_STATUS_SKIPPED)
+
+	def test_aut124_mix_no_recipient_and_already_sent_stays_completed(self, *_):
+		"""Verify that a mix of no-recipient skip and already-sent skip stays Completed.
+
+		Args:
+			*_: Mocked send callables provided by class-level patch decorators.
+
+		Returns:
+			None. Asserts run status is Completed.
+		"""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s2", "status": "Ended"}]
+		log = [
+			{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": RESULT_SKIPPED_ALREADY_SENT},
+			{"path_id": "p1", "node_id": "s2", "step_type": "Send Email", "result": RESULT_SKIPPED_NO_RECIPIENT},
+		]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
 
 
 class TestSentCount(unittest.TestCase):

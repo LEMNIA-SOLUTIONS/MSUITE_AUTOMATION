@@ -19,8 +19,9 @@ from msuite_automation.msuite_automation.constants import (
 )
 from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_automation.msuite_automation.constants import (
-	DATE_BASED, DELIVERY_FAILED_DEFAULT_ERROR, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, MESSAGE_STATUS_FAILED, RUN_DOCTYPE, RUN_ERROR_MAX,
-	RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RUN_STATUS_FAILED, SCHEDULE,
+	DATE_BASED, DEAL_DOCTYPE, DEAL_PRIMARY_CONTACT_MOBILE, DELIVERY_FAILED_DEFAULT_ERROR, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, MESSAGE_STATUS_FAILED,
+	RESULT_SKIPPED_PREFIX, RUN_DOCTYPE, RUN_ERROR_MAX,
+	RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, SCHEDULE,
 	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
 )
 from msuite_automation.msuite_automation.engine import preview
@@ -253,12 +254,35 @@ def _fields(doctype: str, prefix: str = "", label_prefix: str = "") -> list[dict
 
 @frappe.whitelist()
 def get_doctype_fields(doctype: str) -> list[dict]:
+	"""Return selectable field metadata for a given DocType.
+
+	Args:
+		doctype: Name of the DocType to inspect.
+
+	Returns:
+		list[dict]: List of field dictionaries with fieldname, label, fieldtype, options, reqd.
+			Includes sales_order.* fields for Delivery Note, and primary_contact_mobile for CRM Deal.
+
+	Raises:
+		frappe.PermissionError: If caller lacks read permission on DOCTYPE or target doctype.
+
+	Side Effects:
+		None.
+	"""
 	check_read(DOCTYPE)
 	if not frappe.has_permission(doctype, "read"):
 		raise frappe.PermissionError
 	out = _fields(doctype)
 	if doctype == "Delivery Note":
 		out += _fields("Sales Order", "sales_order.", "Sales Order › ")
+	elif doctype == DEAL_DOCTYPE:
+		out.append({
+			"fieldname": DEAL_PRIMARY_CONTACT_MOBILE,
+			"label": _("Primary Contact Mobile"),
+			"fieldtype": "Data",
+			"options": "Phone",
+			"reqd": 0,
+		})
 	return out
 
 
@@ -369,18 +393,55 @@ def _last_run_error(log_entries: list) -> str:
 	return ""
 
 
+def _last_run_skip_reason(log_entries: list) -> str:
+	"""Extract the most recent step skip reason from a run log.
+
+	Args:
+		log_entries: List of log entry dictionaries from the run.
+
+	Returns:
+		str: Skip reason truncated to RUN_ERROR_MAX, or empty string.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	for entry in reversed(log_entries or []):
+		if isinstance(entry, dict):
+			res = str(entry.get("result") or "")
+			if res.startswith(RESULT_SKIPPED_PREFIX):
+				return res[:RUN_ERROR_MAX]
+	return ""
+
+
 def _mark_delivery_failure(run) -> None:
 	"""Show a run as Failed when WhatsApp reports one of its messages as failed after sending.
 
 	Display only: the stored run status is unchanged, and `delivery_failed` tells the UI
 	that Retry does not apply (retry_run accepts only runs stored as Failed).
+
+	Args:
+		run: Run dictionary or document to inspect and update in-place.
+
+	Returns:
+		None.
+
+	Raises:
+		None.
+
+	Side Effects:
+		Mutates run['status'], run['delivery_failed'], and run['error'] in-memory.
 	"""
 	failed = [e for e in run.log if isinstance(e, dict) and str(e.get("status") or "").lower() == MESSAGE_STATUS_FAILED]
 	if not failed or run.status == RUN_STATUS_FAILED:
 		return
 	run.status = RUN_STATUS_FAILED
 	run["delivery_failed"] = True
-	run["error"] = str(failed[-1].get("status_error") or DELIVERY_FAILED_DEFAULT_ERROR)[:RUN_ERROR_MAX]
+	failed_entry = failed[-1]
+	reason = failed_entry.get("failure_reason") or failed_entry.get("status_error") or DELIVERY_FAILED_DEFAULT_ERROR
+	run["error"] = str(reason)[:RUN_ERROR_MAX]
 
 
 @frappe.whitelist()
@@ -414,7 +475,7 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 			r.log = []
 		r.creation = str(r.creation)
 		r.resume_at = str(r.resume_at) if r.resume_at else None
-		r["error"] = _last_run_error(r.log) if r.status == RUN_STATUS_FAILED else ""
+		r["error"] = _last_run_error(r.log) if r.status == RUN_STATUS_FAILED else (_last_run_skip_reason(r.log) if r.status == RUN_STATUS_SKIPPED else "")
 		r["delivery_failed"] = False
 		for entry in r.log:
 			if isinstance(entry, dict) and entry.get("message"):
@@ -424,7 +485,7 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 		cm_rows = frappe.get_all(
 			"Channel Message",
 			filters={"name": ["in", list(msg_names)]},
-			fields=["name", "status", "status_error"],
+			fields=["name", "status", "status_error", "failure_reason"],
 		)
 		cm_by_name = {cm["name"]: cm for cm in cm_rows}
 		for r in rows:
@@ -433,8 +494,10 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 					cm = cm_by_name[entry["message"]]
 					if cm.get("status"):
 						entry["status"] = cm["status"]
-					if cm.get("status_error"):
-						entry["status_error"] = cm["status_error"]
+					reason = cm.get("failure_reason") or cm.get("status_error")
+					if reason:
+						entry["status_error"] = reason
+						entry["failure_reason"] = reason
 		for r in rows:
 			_mark_delivery_failure(r)
 

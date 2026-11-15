@@ -14,7 +14,9 @@ from frappe.utils.safe_exec import get_safe_globals, safe_exec
 from msuite_core.constants import LOGGER_NAME
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST, DOCTYPE, IF_ELSE, ONCE_PER_DAY, ONCE_PER_DOCUMENT, OUTBOX_DOCTYPE, PATH_RUNNING, PATH_WAITING, QUEUE_SHORT,
-	RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX, SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
+	RESULT_SKIPPED_PREFIX, RESULT_SKIPPED_RECIPIENT_REASONS, RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX,
+	RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, RUN_STATUS_WAITING,
+	SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
 	STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
 )
 from msuite_automation.msuite_automation.engine import channels
@@ -277,6 +279,30 @@ def _node_executor(automation, graph, ctx, log):
 
 
 def _persist(run, paths, log) -> None:
+	"""Persist run state, active paths, and execution log to the database.
+
+	Calculates the overall run status:
+	- 'Waiting': if any path is currently parked at a Wait or Wait for Event step.
+	- 'Failed': if any Update Field or send step resulted in an error.
+	- 'Skipped': if all send steps were skipped due to recipient reasons
+	  (e.g. no recipient, opted out, no consent, no consent record).
+	- 'Completed': if execution completed successfully without terminal failures
+	  (including idempotency skips like duplicate or already sent).
+
+	Args:
+		run: Messaging Automation Run document to update and save.
+		paths: List of active/ended execution path dictionaries.
+		log: Execution log entries recorded during the run.
+
+	Returns:
+		None.
+
+	Raises:
+		None. Errors during save are handled by the caller or bubbled.
+
+	Side Effects:
+		Mutates and saves the Messaging Automation Run document (bypassing permissions).
+	"""
 	last_sends = {}
 	for entry in log:
 		if str(entry.get("step_type", "")).startswith("Send"):
@@ -286,13 +312,23 @@ def _persist(run, paths, log) -> None:
 	update_failed = any(entry.get("step_type") == UPDATE_FIELD and entry.get("result") == "error" for entry in log)
 	failed = update_failed or any(entry.get("result") == "error" for entry in last_sends.values())
 	waiting = any(p["status"] == PATH_WAITING for p in paths)
+	all_skipped = bool(last_sends) and all(
+		entry.get("result") in RESULT_SKIPPED_RECIPIENT_REASONS for entry in last_sends.values()
+	)
 	run.set("paths", [{"path_id": p["path_id"], "node_id": p["node_id"], "status": p["status"],
 		"executed": 1 if p.get("executed") else 0, "joined": 1 if p.get("joined") else 0,
 		"wait_for_event": 1 if p.get("wait_for_event") else 0,
 		"wait_key": p.get("wait_key") or "",
 		"retry_count": cint(p.get("retry_count", 0)),
 		"resume_at": p.get("resume_at") if p["status"] == PATH_WAITING else None} for p in paths])
-	run.status = "Waiting" if waiting else ("Failed" if failed else "Completed")
+	if waiting:
+		run.status = RUN_STATUS_WAITING
+	elif failed:
+		run.status = RUN_STATUS_FAILED
+	elif all_skipped:
+		run.status = RUN_STATUS_SKIPPED
+	else:
+		run.status = RUN_STATUS_COMPLETED
 	run.log = json.dumps(log, default=str)
 	run.sent_count = _sent(log)
 	run.resume_step_id = None

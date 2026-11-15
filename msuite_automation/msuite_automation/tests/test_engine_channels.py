@@ -164,6 +164,62 @@ class TestChannels(unittest.TestCase):
 		channels.send_whatsapp(a, step, doc)
 		self.assertNotIn("phone_number_id", send.call_args.kwargs["payload"])
 
+	def test_aut124_resolve_phone_deal_primary_contact_child_row(self):
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0001",
+			mobile_no="",
+			phone="",
+			contacts=[
+				frappe._dict(is_primary=0, mobile_no="919111111111", contact="C1"),
+				frappe._dict(is_primary=1, mobile_no="919876543210", contact="C2"),
+			],
+		)
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		self.assertEqual(channels.resolve_phone(a, deal), "919876543210")
+		# Also works when phone_field is default/empty
+		a_default = frappe._dict(name="MA-1", phone_field=None)
+		self.assertEqual(channels.resolve_phone(a_default, deal), "919876543210")
+
+	def test_aut124_resolve_phone_deal_primary_contact_linked_contact(self):
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0002",
+			mobile_no="",
+			phone="",
+			contacts=[
+				frappe._dict(is_primary=1, mobile_no="", contact="C_PRIMARY"),
+			],
+		)
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		with patch("frappe.db.get_value", return_value="919999888877") as mock_gv:
+			res = channels.resolve_phone(a, deal)
+			mock_gv.assert_called_with("Contact", "C_PRIMARY", "mobile_no")
+			self.assertEqual(res, "919999888877")
+
+	def test_aut124_resolve_phone_deal_no_contacts_returns_none(self):
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0003",
+			mobile_no="",
+			phone="",
+			contacts=[],
+		)
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		self.assertIsNone(channels.resolve_phone(a, deal))
+
+	def test_aut124_field_value_deal_primary_contact_mobile(self):
+		from msuite_automation.msuite_automation.engine.filters import field_value
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0004",
+			mobile_no="",
+			contacts=[
+				frappe._dict(is_primary=1, mobile_no="919876543210", contact="C2"),
+			],
+		)
+		self.assertEqual(field_value(deal, "primary_contact_mobile"), "919876543210")
+
 
 class TestAcquireLock(unittest.TestCase):
 	def _cache(self, result=None, error=None):

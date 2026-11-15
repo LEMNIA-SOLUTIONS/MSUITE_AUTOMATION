@@ -87,7 +87,9 @@ MARKETING_CATEGORY = "MARKETING"
 WHATSAPP_SETTINGS_DOCTYPE = "WhatsApp Settings"
 REQUIRE_OPT_IN_FIELD = "require_marketing_opt_in"  # WhatsApp Settings Check field
 RESULT_SKIPPED_PREFIX = "skipped: "
+RESULT_SKIPPED_NO_RECIPIENT = "skipped: no recipient"
 RESULT_SKIPPED_DUPLICATE = "skipped: duplicate"
+RESULT_SKIPPED_ALREADY_SENT = "skipped: already sent"
 RESULT_SKIPPED_UNSUPPORTED_TYPE = "skipped: not a supported mention type"
 RESULT_SKIPPED_IG_LOGIN = "skipped: instagram login account"
 RESULT_SKIPPED_REPLY_REFUSED = "skipped: reply refused"
@@ -97,8 +99,27 @@ RESULT_SKIPPED_OPTED_OUT = "skipped: opted out"
 RESULT_SKIPPED_NO_CONSENT = "skipped: no consent"
 RESULT_SKIPPED_NO_CONSENT_RECORD = "skipped: no consent record"
 RESULT_SKIPPED_TEMPLATES_DISABLED = "skipped: templates disabled"
+
+# Skips that indicate non-delivery due to recipient reasons (opted out, no recipient, etc.).
+# Only when all send steps encounter these reasons does the automation run become Skipped.
+RESULT_SKIPPED_RECIPIENT_REASONS = (
+	RESULT_SKIPPED_NO_RECIPIENT,
+	RESULT_SKIPPED_OPTED_OUT,
+	RESULT_SKIPPED_NO_CONSENT,
+	RESULT_SKIPPED_NO_CONSENT_RECORD,
+)
+RECIPIENT_SKIP_RESULTS = RESULT_SKIPPED_RECIPIENT_REASONS
 REASON_SEND_FAILED = "send failed"
 RUN_STATUS_FAILED = "Failed"
+RUN_STATUS_SKIPPED = "Skipped"
+RUN_STATUS_COMPLETED = "Completed"
+RUN_STATUS_WAITING = "Waiting"
+DEAL_DOCTYPE = "CRM Deal"
+DEAL_PRIMARY_CONTACT_MOBILE = "primary_contact_mobile"
+DEAL_PRIMARY_CONTACT_MOBILE_ALT = "primary_contact.mobile_no"
+DEAL_CONTACTS_CHILD_DOCTYPE = "CRM Contacts"
+CONTACT_DOCTYPE = "Contact"
+FIELD_MOBILE_NO = "mobile_no"
 MESSAGE_STATUS_FAILED = "failed"  # Channel Message status, compared lower-case
 DELIVERY_FAILED_DEFAULT_ERROR = "Message delivery failed"
 RETRY_MENTION_PENDING = "mention resolution pending"
