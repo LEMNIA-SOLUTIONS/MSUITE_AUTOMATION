@@ -319,6 +319,81 @@ class TestGraphRun(unittest.TestCase):
 			executor._persist(run, paths, log)
 		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
 
+	def test_structured_skip_recipient_reasons_mark_run_skipped(self, *_):
+		"""Verify that new structured log shape with status='skipped' and recipient reason marks run as Skipped."""
+		from msuite_automation.msuite_automation.constants import RECIPIENT_SKIP_REASONS
+		for reason in RECIPIENT_SKIP_REASONS:
+			with self.subTest(reason=reason):
+				run = frappe.get_doc({
+					"doctype": RUN_DOCTYPE,
+					"automation": "test_auto",
+					"trigger_id": "t1",
+					"status": "Running",
+					"reference_doctype": "ToDo",
+					"reference_name": "TODO-1",
+				})
+				run.flags.ignore_links = True
+				paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+				log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "status": "skipped", "reason": reason, "result": f"skipped: {reason}"}]
+				with patch.object(run, "save"):
+					executor._persist(run, paths, log)
+				self.assertEqual(run.status, RUN_STATUS_SKIPPED)
+
+	def test_structured_skip_duplicate_and_already_sent_stay_completed(self, *_):
+		"""Verify that new structured log shape with non-recipient skips (duplicate, already sent) stay Completed."""
+		for reason in ("duplicate", "already sent"):
+			with self.subTest(reason=reason):
+				run = frappe.get_doc({
+					"doctype": RUN_DOCTYPE,
+					"automation": "test_auto",
+					"trigger_id": "t1",
+					"status": "Running",
+					"reference_doctype": "ToDo",
+					"reference_name": "TODO-1",
+				})
+				run.flags.ignore_links = True
+				paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+				log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "status": "skipped", "reason": reason, "result": f"skipped: {reason}"}]
+				with patch.object(run, "save"):
+					executor._persist(run, paths, log)
+				self.assertEqual(run.status, RUN_STATUS_COMPLETED)
+
+	def test_stored_old_log_shape_recipient_skips_mark_run_skipped(self, *_):
+		"""Verify that stored run logs written before D7 (only result string, no status/reason keys) still map to Skipped."""
+		for skip_string in RESULT_SKIPPED_RECIPIENT_REASONS:
+			with self.subTest(skip_string=skip_string):
+				run = frappe.get_doc({
+					"doctype": RUN_DOCTYPE,
+					"automation": "test_auto",
+					"trigger_id": "t1",
+					"status": "Running",
+					"reference_doctype": "ToDo",
+					"reference_name": "TODO-1",
+				})
+				run.flags.ignore_links = True
+				paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+				log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": skip_string}]
+				with patch.object(run, "save"):
+					executor._persist(run, paths, log)
+				self.assertEqual(run.status, RUN_STATUS_SKIPPED)
+
+	def test_stored_old_log_shape_duplicate_stays_completed(self, *_):
+		"""Verify that legacy stored run logs with 'skipped: duplicate' stay Completed."""
+		run = frappe.get_doc({
+			"doctype": RUN_DOCTYPE,
+			"automation": "test_auto",
+			"trigger_id": "t1",
+			"status": "Running",
+			"reference_doctype": "ToDo",
+			"reference_name": "TODO-1",
+		})
+		run.flags.ignore_links = True
+		paths = [{"path_id": "p1", "node_id": "s1", "status": "Ended"}]
+		log = [{"path_id": "p1", "node_id": "s1", "step_type": "Send WhatsApp", "result": RESULT_SKIPPED_DUPLICATE}]
+		with patch.object(run, "save"):
+			executor._persist(run, paths, log)
+		self.assertEqual(run.status, RUN_STATUS_COMPLETED)
+
 	def test_aut124_all_recipient_skip_reasons_mark_run_skipped(self, *_):
 		"""Verify that every skip reason in RESULT_SKIPPED_RECIPIENT_REASONS marks run as Skipped.
 

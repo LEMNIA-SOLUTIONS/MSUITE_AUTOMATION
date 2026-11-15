@@ -238,6 +238,50 @@ class TestChannels(unittest.TestCase):
 			)
 			self.assertEqual(res, "919123456789")
 
+	def test_deal_two_primary_contacts_picks_lowest_idx(self):
+		"""Verify that a Deal with two is_primary child rows picks the one with the lowest idx."""
+		from msuite_automation.msuite_automation.engine.filters import field_value
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0010",
+			contacts=[
+				frappe._dict(is_primary=1, idx=3, mobile_no="919876543213", contact="C3"),
+				frappe._dict(is_primary=1, idx=1, mobile_no="919876543211", contact="C1"),
+				frappe._dict(is_primary=0, idx=2, mobile_no="919876543212", contact="C2"),
+			],
+		)
+		self.assertEqual(field_value(deal, "primary_contact_mobile"), "919876543211")
+		a = frappe._dict(name="MA-1", phone_field=None)
+		self.assertEqual(channels.resolve_phone(a, deal), "919876543211")
+
+	def test_deal_no_primary_contacts_returns_none(self):
+		"""Verify that a Deal with no is_primary child rows returns None and does not fall back to Deal.contact."""
+		from msuite_automation.msuite_automation.engine.filters import field_value
+		deal = frappe._dict(
+			doctype="CRM Deal",
+			name="CRM-DEAL-0011",
+			contact="C_DEAL_FALLBACK",
+			contacts=[
+				frappe._dict(is_primary=0, idx=1, mobile_no="919876543210", contact="C_NON_PRIMARY"),
+			],
+		)
+		self.assertIsNone(field_value(deal, "primary_contact_mobile"))
+		a = frappe._dict(name="MA-1", phone_field="primary_contact_mobile")
+		self.assertIsNone(channels.resolve_phone(a, deal))
+
+	def test_virtual_field_resolvers_table_defined(self):
+		"""Verify that VIRTUAL_FIELD_RESOLVERS is defined at module level in engine.filters."""
+		from msuite_automation.msuite_automation.engine.filters import VIRTUAL_FIELD_RESOLVERS
+		self.assertIn(("CRM Deal", "primary_contact_mobile"), VIRTUAL_FIELD_RESOLVERS)
+		self.assertIn(("Delivery Note", "sales_order.*"), VIRTUAL_FIELD_RESOLVERS)
+
+	def test_resolve_phone_has_no_deal_specific_branch(self):
+		"""Verify that channels.resolve_phone has no hardcoded Deal branch and reads the table."""
+		import inspect
+		source = inspect.getsource(channels.resolve_phone)
+		self.assertNotIn("DEAL_DOCTYPE", source)
+		self.assertNotIn("CRM Deal", source)
+
 
 class TestAcquireLock(unittest.TestCase):
 	def _cache(self, result=None, error=None):

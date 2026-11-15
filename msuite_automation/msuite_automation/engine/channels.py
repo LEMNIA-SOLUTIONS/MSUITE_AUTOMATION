@@ -16,7 +16,6 @@ from frappe.utils import cint, today
 from msuite_core.utils.phone import format_number
 from msuite_inbox.inbox.services.outbound import send_to_phone
 from msuite_automation.msuite_automation.constants import (
-	DEAL_DOCTYPE,
 	DEDUPE_LOCK_TTL_SECONDS,
 	ONCE_PER_DAY,
 	ONCE_PER_DOCUMENT,
@@ -27,6 +26,7 @@ from msuite_automation.msuite_automation.engine.filters import (
 	field_value,
 	get_deal_primary_contact_mobile,
 	get_linked_sales_order,
+	resolve_virtual_phone,
 )
 from msuite_core.constants import LOGGER_NAME
 from msuite_core.utils.phone import clean_mobile
@@ -214,13 +214,11 @@ def resolve_phone(automation, doc):
 		None.
 
 	Side Effects:
-		May query database for CRM Deal primary contact child rows / Contact record when applicable.
+		May query database via virtual field resolvers or Contact records when applicable.
 	"""
 	raw = _first(doc, [_get(automation, "phone_field"), *PHONE_FALLBACK])
 	if not raw:
-		doc_dt = getattr(doc, "doctype", None) or (doc.get("doctype") if isinstance(doc, dict) else None)
-		if doc_dt == DEAL_DOCTYPE:
-			raw = get_deal_primary_contact_mobile(doc)
+		raw = resolve_virtual_phone(doc)
 	if not raw:
 		return None
 	cleaned, error = clean_mobile(raw)

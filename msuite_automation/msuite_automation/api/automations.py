@@ -25,6 +25,7 @@ from msuite_automation.msuite_automation.constants import (
 	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
 )
 from msuite_automation.msuite_automation.engine import preview
+from msuite_automation.msuite_automation.engine.filters import VIRTUAL_FIELD_RESOLVERS
 from msuite_core.services.permissions.checks import check_delete, check_read, check_write
 
 CHILD_TABLES = ("triggers", "filters", "steps", "variable_mappings", "edges", "recipients", "notes")
@@ -256,6 +257,9 @@ def _fields(doctype: str, prefix: str = "", label_prefix: str = "") -> list[dict
 def get_doctype_fields(doctype: str) -> list[dict]:
 	"""Return selectable field metadata for a given DocType.
 
+	Reads standard and custom fields from meta, and appends virtual fields
+	registered in VIRTUAL_FIELD_RESOLVERS for the given DocType.
+
 	Args:
 		doctype: Name of the DocType to inspect.
 
@@ -273,16 +277,12 @@ def get_doctype_fields(doctype: str) -> list[dict]:
 	if not frappe.has_permission(doctype, "read"):
 		raise frappe.PermissionError
 	out = _fields(doctype)
-	if doctype == "Delivery Note":
-		out += _fields("Sales Order", "sales_order.", "Sales Order › ")
-	elif doctype == DEAL_DOCTYPE:
-		out.append({
-			"fieldname": DEAL_PRIMARY_CONTACT_MOBILE,
-			"label": _("Primary Contact Mobile"),
-			"fieldtype": "Data",
-			"options": "Phone",
-			"reqd": 0,
-		})
+	for (dt, field), entry in VIRTUAL_FIELD_RESOLVERS.items():
+		if dt == doctype:
+			if entry.get("target_doctype") and entry.get("prefix"):
+				out += _fields(entry["target_doctype"], entry["prefix"], entry.get("label_prefix", ""))
+			elif entry.get("field_meta"):
+				out.append(entry["field_meta"])
 	return out
 
 
@@ -413,6 +413,8 @@ def _last_run_reason(log_entries: list, key: str = "error") -> str:
 	for entry in reversed(log_entries or []):
 		if isinstance(entry, dict):
 			if key == "result":
+				if entry.get("status") == RUN_STATUS_SKIPPED.lower() and entry.get("reason"):
+					return f"{RESULT_SKIPPED_PREFIX}{entry['reason']}"[:RUN_ERROR_MAX]
 				res = str(entry.get("result") or "")
 				if res.startswith(RESULT_SKIPPED_PREFIX):
 					return res[:RUN_ERROR_MAX]

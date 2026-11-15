@@ -82,23 +82,166 @@ STEP_TYPES = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS, WAIT, WAIT_EVENT, IF_ELSE, SW
 SEND_STEPS = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS)
 ACTION_TYPES = (SEND_WHATSAPP, SEND_EMAIL, SEND_SMS, UPDATE_FIELD, ADD_TO_LIST, SEND_IG_PUBLIC_REPLY, SEND_IG_CONSENT_TEMPLATE)
 
-RESULT_SENT = "sent"
+# ── Structured step execution outcome (Task 4 / D7) ─────────────────────────
+STEP_STATUS_SENT = "sent"
+STEP_STATUS_SKIPPED = "skipped"
+STEP_STATUS_UPDATED = "updated"
+STEP_STATUS_ADDED = "added"
+STEP_STATUS_ERROR = "error"
+
+SKIP_REASON_NO_RECIPIENT = "no recipient"
+SKIP_REASON_DUPLICATE = "duplicate"
+SKIP_REASON_ALREADY_SENT = "already sent"
+SKIP_REASON_UNSUPPORTED_TYPE = "not a supported mention type"
+SKIP_REASON_IG_LOGIN = "instagram login account"
+SKIP_REASON_REPLY_REFUSED = "reply refused"
+SKIP_REASON_MENTION_UNRESOLVED = "mention not resolved"
+SKIP_REASON_NO_AUTHOR = "mention author unknown"
+SKIP_REASON_OPTED_OUT = "opted out"
+SKIP_REASON_NO_CONSENT = "no consent"
+SKIP_REASON_NO_CONSENT_RECORD = "no consent record"
+SKIP_REASON_TEMPLATES_DISABLED = "templates disabled"
+SKIP_REASON_ALREADY_IN_LIST = "already in list"
+
+RECIPIENT_SKIP_REASONS = (
+	SKIP_REASON_NO_RECIPIENT,
+	SKIP_REASON_OPTED_OUT,
+	SKIP_REASON_NO_CONSENT,
+	SKIP_REASON_NO_CONSENT_RECORD,
+)
+
+
+class StepOutcome(str):
+	"""Execution outcome of an automation step.
+
+	Inherits from str so existing string comparisons and JSON serialization work
+	without churn, while carrying structured .status and .reason attributes.
+	"""
+
+	status: str
+	reason: str | None
+
+	def __new__(cls, display: str, status: str, reason: str | None = None):
+		"""Construct a StepOutcome.
+
+		Args:
+			display: Human-readable display string ('sent', 'updated', 'skipped: ...').
+			status: Canonical outcome status ('sent', 'skipped', 'updated', 'added', 'error').
+			reason: Optional detailed skip reason or error detail.
+
+		Returns:
+			StepOutcome: String subclass instance carrying status and reason.
+
+		Raises:
+			None.
+
+		Side Effects:
+			None.
+		"""
+		obj = super().__new__(cls, display)
+		obj.status = status
+		obj.reason = reason
+		return obj
+
+
+def step_sent() -> StepOutcome:
+	"""Construct a successful 'sent' step outcome.
+
+	Returns:
+		StepOutcome: 'sent' outcome with status='sent' and reason=None.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	return StepOutcome("sent", status=STEP_STATUS_SENT, reason=None)
+
+
+def step_skipped(reason: str) -> StepOutcome:
+	"""Construct a 'skipped: <reason>' step outcome.
+
+	Args:
+		reason: Description of why the step was skipped.
+
+	Returns:
+		StepOutcome: Formatted skip outcome with status='skipped' and reason=reason.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	return StepOutcome(f"{RESULT_SKIPPED_PREFIX}{reason}", status=STEP_STATUS_SKIPPED, reason=reason)
+
+
+def step_updated() -> StepOutcome:
+	"""Construct an 'updated' step outcome.
+
+	Returns:
+		StepOutcome: 'updated' outcome with status='updated' and reason=None.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	return StepOutcome("updated", status=STEP_STATUS_UPDATED, reason=None)
+
+
+def step_added() -> StepOutcome:
+	"""Construct an 'added' step outcome for recipient lists.
+
+	Returns:
+		StepOutcome: 'added' outcome with status='added' and reason=None.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	return StepOutcome("added", status=STEP_STATUS_ADDED, reason=None)
+
+
+def step_error(reason: str) -> StepOutcome:
+	"""Construct an 'error: <reason>' step outcome.
+
+	Args:
+		reason: Error detail string.
+
+	Returns:
+		StepOutcome: 'error: <reason>' outcome with status='error' and reason=reason.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	return StepOutcome(f"error: {reason}", status=STEP_STATUS_ERROR, reason=reason)
+
+
+RESULT_SKIPPED_PREFIX = "skipped: "
+RESULT_SENT = step_sent()
 MARKETING_CATEGORY = "MARKETING"
 WHATSAPP_SETTINGS_DOCTYPE = "WhatsApp Settings"
 REQUIRE_OPT_IN_FIELD = "require_marketing_opt_in"  # WhatsApp Settings Check field
-RESULT_SKIPPED_PREFIX = "skipped: "
-RESULT_SKIPPED_NO_RECIPIENT = "skipped: no recipient"
-RESULT_SKIPPED_DUPLICATE = "skipped: duplicate"
-RESULT_SKIPPED_ALREADY_SENT = "skipped: already sent"
-RESULT_SKIPPED_UNSUPPORTED_TYPE = "skipped: not a supported mention type"
-RESULT_SKIPPED_IG_LOGIN = "skipped: instagram login account"
-RESULT_SKIPPED_REPLY_REFUSED = "skipped: reply refused"
-RESULT_SKIPPED_MENTION_UNRESOLVED = "skipped: mention not resolved"
-RESULT_SKIPPED_NO_AUTHOR = "skipped: mention author unknown"
-RESULT_SKIPPED_OPTED_OUT = "skipped: opted out"
-RESULT_SKIPPED_NO_CONSENT = "skipped: no consent"
-RESULT_SKIPPED_NO_CONSENT_RECORD = "skipped: no consent record"
-RESULT_SKIPPED_TEMPLATES_DISABLED = "skipped: templates disabled"
+RESULT_SKIPPED_NO_RECIPIENT = step_skipped(SKIP_REASON_NO_RECIPIENT)
+RESULT_SKIPPED_DUPLICATE = step_skipped(SKIP_REASON_DUPLICATE)
+RESULT_SKIPPED_ALREADY_SENT = step_skipped(SKIP_REASON_ALREADY_SENT)
+RESULT_SKIPPED_UNSUPPORTED_TYPE = step_skipped(SKIP_REASON_UNSUPPORTED_TYPE)
+RESULT_SKIPPED_IG_LOGIN = step_skipped(SKIP_REASON_IG_LOGIN)
+RESULT_SKIPPED_REPLY_REFUSED = step_skipped(SKIP_REASON_REPLY_REFUSED)
+RESULT_SKIPPED_MENTION_UNRESOLVED = step_skipped(SKIP_REASON_MENTION_UNRESOLVED)
+RESULT_SKIPPED_NO_AUTHOR = step_skipped(SKIP_REASON_NO_AUTHOR)
+RESULT_SKIPPED_OPTED_OUT = step_skipped(SKIP_REASON_OPTED_OUT)
+RESULT_SKIPPED_NO_CONSENT = step_skipped(SKIP_REASON_NO_CONSENT)
+RESULT_SKIPPED_NO_CONSENT_RECORD = step_skipped(SKIP_REASON_NO_CONSENT_RECORD)
+RESULT_SKIPPED_TEMPLATES_DISABLED = step_skipped(SKIP_REASON_TEMPLATES_DISABLED)
 
 # Skips that indicate non-delivery due to recipient reasons (opted out, no recipient, etc.).
 # Only when all send steps encounter these reasons does the automation run become Skipped.

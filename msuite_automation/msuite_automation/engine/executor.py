@@ -14,10 +14,10 @@ from frappe.utils.safe_exec import get_safe_globals, safe_exec
 from msuite_core.constants import LOGGER_NAME
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST, DOCTYPE, IF_ELSE, ONCE_PER_DAY, ONCE_PER_DOCUMENT, OUTBOX_DOCTYPE, PATH_RUNNING, PATH_WAITING, QUEUE_SHORT,
-	RESULT_SKIPPED_PREFIX, RESULT_SKIPPED_RECIPIENT_REASONS, RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX,
+	RECIPIENT_SKIP_REASONS, RESULT_SKIPPED_PREFIX, RESULT_SKIPPED_RECIPIENT_REASONS, RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX,
 	RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, RUN_STATUS_WAITING,
 	SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
-	STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
+	STEP_STATUS_SKIPPED, STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
 )
 from msuite_automation.msuite_automation.engine import channels
 from msuite_automation.msuite_automation.engine import steps as S
@@ -259,7 +259,12 @@ def _node_executor(automation, graph, ctx, log):
 			entry=entry,
 		)
 		try:
-			entry["result"] = S.execute(node_ctx, step)
+			outcome = S.execute(node_ctx, step)
+			entry["result"] = str(outcome)
+			if hasattr(outcome, "status") and outcome.status:
+				entry["status"] = outcome.status
+			if hasattr(outcome, "reason") and outcome.reason is not None:
+				entry["reason"] = outcome.reason
 			path["retry_count"] = 0
 		except Exception as e:
 			delays = RETRY_DELAYS.get(e.kind, ()) if isinstance(e, channels.SendRetry) else ()
@@ -276,6 +281,36 @@ def _node_executor(automation, graph, ctx, log):
 			frappe.log_error(title=f"Messaging Automation {automation.name} step {node_id} failed")
 		return ""
 	return execute
+
+
+def is_recipient_skip(entry: dict) -> bool:
+	"""Check if a send step log entry represents a recipient-reason skip.
+
+	Supports both new structured status/reason log shapes and legacy string results.
+	Only recipient reasons (no recipient, opted out, no consent, no consent record)
+	count as Skipped. Idempotency skips (duplicate, already sent) do not make a run Skipped.
+
+	Args:
+		entry: Log entry dictionary.
+
+	Returns:
+		bool: True if the entry is a skip due to recipient reasons.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	if not isinstance(entry, dict):
+		return False
+	status = entry.get("status")
+	if status == STEP_STATUS_SKIPPED or getattr(entry.get("result"), "status", None) == STEP_STATUS_SKIPPED:
+		reason = entry.get("reason") or getattr(entry.get("result"), "reason", None)
+		if reason is not None:
+			return reason in RECIPIENT_SKIP_REASONS
+	# Fallback for stored run logs written before this change
+	return entry.get("result") in RESULT_SKIPPED_RECIPIENT_REASONS
 
 
 def _persist(run, paths, log) -> None:
@@ -313,7 +348,7 @@ def _persist(run, paths, log) -> None:
 	failed = update_failed or any(entry.get("result") == "error" for entry in last_sends.values())
 	waiting = any(p["status"] == PATH_WAITING for p in paths)
 	all_skipped = bool(last_sends) and all(
-		entry.get("result") in RESULT_SKIPPED_RECIPIENT_REASONS for entry in last_sends.values()
+		is_recipient_skip(entry) for entry in last_sends.values()
 	)
 	run.set("paths", [{"path_id": p["path_id"], "node_id": p["node_id"], "status": p["status"],
 		"executed": 1 if p.get("executed") else 0, "joined": 1 if p.get("joined") else 0,
