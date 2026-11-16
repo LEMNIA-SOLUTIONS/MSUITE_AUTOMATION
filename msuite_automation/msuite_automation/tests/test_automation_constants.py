@@ -63,6 +63,47 @@ class TestSingleSources(unittest.TestCase):
 			C.DEDUPE_LOCK_TTL_SECONDS, C.RETRY_NOTE_MAX, C.RUN_ERROR_MAX, C.PREVIEW_ERROR_MAX, C.RUN_LIST_DEFAULT_LIMIT, C.RUN_LIST_MAX_LIMIT),
 			(900, 200, 140, 100, 500, 86400, 200, 500, 300, 10, 50))
 
+	def test_step_outcome_str_subclass_and_attributes(self):
+		self.assertEqual(C.STEP_OUTCOME_KEY, "outcome_status")
+		outcome = C.StepOutcome.of("skipped", "no recipient")
+		self.assertIsInstance(outcome, str)
+		self.assertEqual(outcome, "skipped: no recipient")
+		self.assertEqual(outcome.outcome_status, "skipped")
+		self.assertEqual(outcome.reason, "no recipient")
+		self.assertTrue(outcome.startswith("skipped"))
+
+	def test_step_outcome_constructors(self):
+		sent = C.step_sent()
+		self.assertEqual(sent, "sent")
+		self.assertEqual(sent.outcome_status, "sent")
+		self.assertIsNone(sent.reason)
+
+		skipped = C.step_skipped("no recipient")
+		self.assertEqual(skipped, "skipped: no recipient")
+		self.assertEqual(skipped.outcome_status, "skipped")
+		self.assertEqual(skipped.reason, "no recipient")
+
+		updated = C.step_updated()
+		self.assertEqual(updated, "updated")
+		self.assertEqual(updated.outcome_status, "updated")
+		self.assertIsNone(updated.reason)
+
+		added = C.step_added()
+		self.assertEqual(added, "added")
+		self.assertEqual(added.outcome_status, "added")
+		self.assertIsNone(added.reason)
+
+		err = C.step_error("boom")
+		self.assertEqual(err, "error: boom")
+		self.assertEqual(err.outcome_status, "error")
+		self.assertEqual(err.reason, "boom")
+
+	def test_recipient_skip_reasons_contain_all_four(self):
+		self.assertEqual(
+			set(C.RECIPIENT_SKIP_REASONS),
+			{"no recipient", "opted out", "no consent", "no consent record"},
+		)
+
 
 class TestEventCheckLimits(unittest.TestCase):
 	def _step(self):

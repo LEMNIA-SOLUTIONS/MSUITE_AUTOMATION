@@ -43,12 +43,14 @@ from msuite_automation.msuite_automation.constants import (
 	REQUIRE_OPT_IN_FIELD,
 	WHATSAPP_SETTINGS_DOCTYPE,
 	RESULT_SENT,
+	RESULT_SKIPPED_ALREADY_SENT,
 	RESULT_SKIPPED_DUPLICATE,
 	RESULT_SKIPPED_IG_LOGIN,
 	RESULT_SKIPPED_MENTION_UNRESOLVED,
 	RESULT_SKIPPED_NO_AUTHOR,
 	RESULT_SKIPPED_NO_CONSENT,
 	RESULT_SKIPPED_NO_CONSENT_RECORD,
+	RESULT_SKIPPED_NO_RECIPIENT,
 	RESULT_SKIPPED_OPTED_OUT,
 	RESULT_SKIPPED_PREFIX,
 	RESULT_SKIPPED_REPLY_REFUSED,
@@ -60,7 +62,14 @@ from msuite_automation.msuite_automation.constants import (
 	SEND_IG_PUBLIC_REPLY,
 	SEND_SMS,
 	SEND_WHATSAPP,
+	SKIP_REASON_ALREADY_IN_LIST,
+	StepOutcome,
 	UPDATE_FIELD,
+	step_added,
+	step_error,
+	step_sent,
+	step_skipped,
+	step_updated,
 )
 from msuite_automation.msuite_automation.engine import channels
 from msuite_automation.msuite_automation.engine.filters import rules_pass
@@ -105,7 +114,7 @@ def _send(ctx, step, channel, fn):
 	if lock:
 		try:
 			if not channels.acquire_lock(lock):
-				return "skipped: duplicate"
+				return RESULT_SKIPPED_DUPLICATE
 		except channels.LockUnavailable as e:
 			raise channels.SendRetry("transient", f"duplicate-send guard unavailable: {e}") from e
 	try:
@@ -132,7 +141,7 @@ def _send(ctx, step, channel, fn):
 			msg_name = ok.get("message")
 		if msg_name and getattr(ctx, "entry", None) is not None and isinstance(ctx.entry, dict):
 			ctx.entry["message"] = msg_name
-	return "sent" if ok else "skipped: no recipient"
+	return RESULT_SENT if ok else RESULT_SKIPPED_NO_RECIPIENT
 
 
 def update_value(doc, step):
@@ -509,22 +518,36 @@ def send_ig_consent_template(ctx, step) -> str:
 		channels.release_lock(lock_key)
 		reason = f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
 		ig_consent.mark_failed(consent_names, reason)
-		return f"{RESULT_SKIPPED_PREFIX}{reason}"
+		return step_skipped(reason)
 
 	if res.get("ok"):
 		return RESULT_SENT
 	# Nothing was sent: free the lock so a retry is not swallowed as a duplicate.
 	channels.release_lock(lock_key)
 	reason = res.get("reason") or REASON_SEND_FAILED
-	return f"{RESULT_SKIPPED_PREFIX}{reason}"
+	return step_skipped(reason)
 
 
-def execute(ctx, step) -> str:
-	"""Run one non-control step; returns a short result string. Raises on error."""
+def execute(ctx, step) -> StepOutcome:
+	"""Run one non-control step; returns a structured StepOutcome.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, value, etc.
+		step: Automation step document or dictionary.
+
+	Returns:
+		StepOutcome: Structured outcome (outcome_status/status and reason, inherits from str for display string).
+
+	Raises:
+		Exception: On execution errors during send, update, or external dispatch.
+
+	Side Effects:
+		Dispatches messages across channels, updates document fields in DB/memory, or adds recipients to lists.
+	"""
 	a, doc = ctx.automation, ctx.doc
 	if step.step_type == SEND_WHATSAPP:
 		if channels.already_sent(step.template, doc.doctype, doc.name, a.send_frequency, ignore_failed=bool(ctx.get("retrying"))):
-			return "skipped: already sent"
+			return RESULT_SKIPPED_ALREADY_SENT
 		if _is_marketing_opted_out(ctx, step):
 			return RESULT_SKIPPED_OPTED_OUT
 		if _lacks_marketing_consent(ctx, step):
@@ -532,9 +555,9 @@ def execute(ctx, step) -> str:
 		if step.delivery_mode == "Bulk campaign":
 			phone = channels.resolve_phone(a, doc)
 			if not phone:
-				return "skipped: no recipient"
+				return RESULT_SKIPPED_NO_RECIPIENT
 			res = channels.dispatch_bulk(a, step, doc, phone, channels.bulk_body_params(a, step, doc))
-			return "sent" if res.get("status") == "success" else f"error: {res.get('reason')}"
+			return step_sent() if res.get("status") == "success" else step_error(res.get("reason"))
 		return _send(ctx, step, "wa", lambda: channels.send_whatsapp(a, step, doc, phone=ctx.get("phone")))
 	if step.step_type == SEND_EMAIL:
 		return _send(ctx, step, "email", lambda: channels.send_email(a, step, doc))
@@ -544,14 +567,14 @@ def execute(ctx, step) -> str:
 		value = update_value(doc, step)
 		_save_field(doc, step.update_field, value, getattr(a, "owner", None))
 		set_in_memory(doc, step.update_field, value)
-		return "updated"
+		return step_updated()
 	if step.step_type == ADD_TO_LIST:
 		phone = channels.resolve_phone(a, doc)
 		if not phone:
-			return "skipped: no recipient"
-		return "added" if channels.add_to_list(step.recipient_list, phone, doc) else "skipped: already in list"
+			return RESULT_SKIPPED_NO_RECIPIENT
+		return step_added() if channels.add_to_list(step.recipient_list, phone, doc) else step_skipped(SKIP_REASON_ALREADY_IN_LIST)
 	if step.step_type == SEND_IG_PUBLIC_REPLY:
 		return send_ig_public_reply(ctx, step)
 	if step.step_type == SEND_IG_CONSENT_TEMPLATE:
 		return send_ig_consent_template(ctx, step)
-	return f"skipped: unknown step type {step.step_type}"
+	return step_skipped(f"unknown step type {step.step_type}")

@@ -440,6 +440,99 @@ class TestAutomationsApi(unittest.TestCase):
 		run = self._get_runs_with_cm(name, "Failed", "x")[0]
 		self.assertFalse(run["delivery_failed"])
 
+	def test_aut123_get_runs_reads_failure_reason_from_channel_message(self):
+		name = self._run_with_message("ZZ aut123 failure reason")
+		real = frappe.get_all
+		def fake(doctype, *a, **kw):
+			if doctype == "Channel Message":
+				return [{"name": "CM-T-1", "status": "failed", "status_error": None, "failure_reason": "Meta error: Phone number blocked"}]
+			return real(doctype, *a, **kw)
+		with patch("frappe.get_all", side_effect=fake):
+			runs = api.get_runs(name)
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0]["status"], "Failed")
+		self.assertEqual(runs[0]["error"], "Meta error: Phone number blocked")
+		self.assertEqual(runs[0]["log"][0]["failure_reason"], "Meta error: Phone number blocked")
+
+	def test_aut124_get_runs_extracts_skip_reason_for_skipped_run(self):
+		name = api.save_automation(self._payload(title="ZZ aut124 skipped run"))["name"]
+		frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"status": "Skipped",
+			"log": json.dumps([{"step_id": "wa", "step_type": "Send WhatsApp", "result": "skipped: no recipient"}]),
+		}).insert(ignore_permissions=True, ignore_links=True)
+		runs = api.get_runs(name)
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0]["status"], "Skipped")
+		self.assertEqual(runs[0]["error"], "skipped: no recipient")
+
+	def test_aut124_crm_deal_doctype_fields_includes_primary_contact_mobile(self):
+		fields = api.get_doctype_fields("CRM Deal")
+		opt = next((f for f in fields if f["fieldname"] == "primary_contact_mobile"), None)
+		self.assertIsNotNone(opt)
+		self.assertEqual(opt["options"], "Phone")
+
+	def test_failed_run_channel_message_failure_reason_merged_into_error(self):
+		"""CRIT-1: Stored Failed run merges Channel Message failure_reason into r['error'].
+
+		Args:
+			None.
+
+		Returns:
+			None. Asserts run error carries Channel Message failure_reason.
+
+		Raises:
+			None.
+
+		Side Effects:
+			Inserts a test automation and run in DB, cleans up via rollback in tearDown.
+		"""
+		name = self._run_with_message("ZZ failed with cm failure reason", run_status="Failed")
+		real = frappe.get_all
+
+		def fake(doctype, *a, **kw):
+			if doctype == "Channel Message":
+				return [{"name": "CM-T-1", "status": "failed", "status_error": None, "failure_reason": "Meta failure: Phone number blocked"}]
+			return real(doctype, *a, **kw)
+
+		with patch("frappe.get_all", side_effect=fake):
+			runs = api.get_runs(name)
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0]["status"], "Failed")
+		self.assertIn("Meta failure: Phone number blocked", runs[0]["error"])
+		self.assertFalse(runs[0]["delivery_failed"])
+
+	def test_get_automations_last_run_skipped_carries_skip_reason(self):
+		"""MED-3: get_automations last-run error for a Skipped run carries skip reason.
+
+		Args:
+			None.
+
+		Returns:
+			None. Asserts last_run error carries the skip reason.
+
+		Raises:
+			None.
+
+		Side Effects:
+			Inserts a test automation and run in DB, cleans up via rollback in tearDown.
+		"""
+		name = api.save_automation(self._payload(title="ZZ skipped last run"))["name"]
+		frappe.get_doc({
+			"doctype": "Messaging Automation Run",
+			"automation": name,
+			"status": "Skipped",
+			"log": json.dumps([{"step_id": "s1", "step_type": "Send WhatsApp", "outcome_status": "skipped", "reason": "no recipient"}]),
+		}).insert(ignore_permissions=True, ignore_links=True)
+		out = api.get_automations(search="ZZ skipped last run")
+		self.assertEqual(len(out["items"]), 1)
+		last_run = out["items"][0]["last_run"]
+		self.assertIsNotNone(last_run)
+		self.assertEqual(last_run["status"], "Skipped")
+		self.assertEqual(last_run["error"], "skipped: no recipient")
+
+
 	def test_aut120_get_runs_empty_log_no_channel_message_query(self):
 		name = api.save_automation(self._payload(title="ZZ aut120 empty log"))["name"]
 		frappe.get_doc({
