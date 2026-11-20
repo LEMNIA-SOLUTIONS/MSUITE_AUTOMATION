@@ -88,17 +88,21 @@ The full field reference, with every trigger and step field, is in `docs/flavorz
 
 #### Configuration Flag
 
-- Key: `msuite_broadcast_enabled` in `site_config.json` (defaults to `False`).
-- Behaviour:
-  - When `False`, automation actions continue using legacy `Audience` and bulk messaging pipelines.
-  - When `True`, automation actions execute through unified `Broadcast` and `Recipient List` pipelines.
+- Key: `msuite_broadcast_enabled` in `site_config.json`. The default is off.
+- The flag affects only the WhatsApp lead-status automation in `msuite_automation/engine/channels.py`.
+  - Flag off: the automation uses the legacy `WhatsApp Recipient List` and `Bulk WhatsApp Message` code. Nothing changes.
+  - Flag on: the automation uses `Recipient List`, `Recipient Contact` and `Broadcast`.
 
 #### Flagged Lead-Status Automation Path
 
-- In `msuite_automation/engine/channels.py`, workflow actions (`Add to Recipient List`, `Send WhatsApp`, `Send Email`, `Send SMS`):
-  - When `msuite_broadcast_enabled` is active, contacts are added to `Recipient List` (+ `Recipient Contact`) and messages are dispatched via `broadcast_channel_adapters`.
-  - Enforces marketing opt-in consent and opt-out checks before dispatch.
-  - Synchronizes lead status in CRM according to configured automation workflow rules.
+When the flag is on, the automation does these steps for a lead:
+
+1. It skips the lead if the number is invalid or opted out of WhatsApp.
+2. It adds the number (E.164 format) to the `Recipient List` of the rule. It does not add the same number twice.
+3. It finds the open `Broadcast` of the rule (status `Draft` or `Scheduled`) or creates one. The `Broadcast` has one WhatsApp `Broadcast Channel` row with `is_lead_automation_broadcast` set.
+4. It updates the recipient count.
+
+The automation does not send messages itself. The central broadcast scheduler and the WhatsApp channel adapter send the `Broadcast` after it is launched. There is no Email or SMS path in this automation.
 
 #### Tests
 
