@@ -82,6 +82,30 @@ These endpoints return the value directly. They do not use the `{ok, data, error
 
 The full field reference, with every trigger and step field, is in `docs/flavorz-msuite-api-for-sagar.md` in the workspace root.
 
+### Broadcast Integration
+
+`msuite_automation` integrates with unified Broadcasts and Recipient Lists for workflow step execution.
+
+#### Configuration Flag
+
+- Key: `msuite_broadcast_enabled` in `site_config.json` (defaults to `False`).
+- Behaviour:
+  - When `False`, automation actions continue using legacy `Audience` and bulk messaging pipelines.
+  - When `True`, automation actions execute through unified `Broadcast` and `Recipient List` pipelines.
+
+#### Flagged Lead-Status Automation Path
+
+- In `msuite_automation/engine/channels.py`, workflow actions (`Add to Recipient List`, `Send WhatsApp`, `Send Email`, `Send SMS`):
+  - When `msuite_broadcast_enabled` is active, contacts are added to `Recipient List` (+ `Recipient Contact`) and messages are dispatched via `broadcast_channel_adapters`.
+  - Enforces marketing opt-in consent and opt-out checks before dispatch.
+  - Synchronizes lead status in CRM according to configured automation workflow rules.
+
+#### Tests
+
+```bash
+bench --site lemnia.localhost run-tests --app msuite_automation --module msuite_automation.msuite_automation.tests.test_broadcast_path
+```
+
 ### Installation
 
 You can install this app using the [bench](https://github.com/frappe/bench) CLI:
