@@ -36,9 +36,51 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 
 ### External API (token auth)
 
-An external user manages mention automations with the endpoints in `msuite_automation.msuite_automation.api.automations`: `save_automation`, `toggle_automation`, `get_runs`, `get_automation`, `get_automations` and `delete_automation`. A mention automation uses a `Document Event` trigger on `Social Mention` and a `Send IG Public Reply` step.
+An external system (for example Flavorz) manages automations with the endpoints in `msuite_automation.msuite_automation.api.automations`. Send `Authorization: token <api_key>:<api_secret>`. Automations are `Messaging Automation` documents.
 
-The `Messaging Automation` DocType gives write access to `System Manager`, `MSuite Admin` and `WhatsApp Manager`. Give the API user one of these roles. `Social Manager` cannot manage automations. `get_runs` returns at most `RUN_LIST_MAX_LIMIT` runs per call. See `docs/flavorz-external-api.md` in the workspace root.
+These endpoints return the value directly. They do not use the `{ok, data, error}` envelope of the social post API. An error returns a real HTTP status (403 no permission, 404 not found, 417 validation).
+
+**Roles.** `WhatsApp Manager`, `MSuite Admin` and `System Manager` can read, write and delete `Messaging Automation`. `Social Manager` cannot manage automations. A plan limit on active automations and on runs per month can also refuse a call.
+
+| Endpoint | Method | Arguments | Returns |
+|---|---|---|---|
+| `get_automations` | GET | `search`, `trigger_type`, `enabled` (`1` or `0`), `reference_doctype`, `start`, `page_length` | `{"items": [...], "total_count": n}`. Each item: `name`, `title`, `disabled`, `trigger_type`, `reference_doctype`, `trigger_types`, `doctypes`, `when_summary`, `channels`, `last_run`, `modified`. |
+| `get_automation` | GET | `name` | The document with all child tables. |
+| `save_automation` | POST | `doc` (JSON). Include `name` to update. | `{"name": ...}` |
+| `toggle_automation` | POST | `name`, `enabled` (`1` or `0`) | `{"name": ..., "disabled": 0 or 1}` |
+| `duplicate_automation` | POST | `name` | `{"name": <copy>}`. The copy is off and titled "<title> (copy)". |
+| `delete_automation` | POST | `name` | `{"name": ...}` |
+| `bulk_delete_automations` | POST | `names` (list) | `{"deleted": [...], "failed": [{"name", "error"}]}` |
+| `get_runs` | GET | `name`, `limit` (default `RUN_LIST_DEFAULT_LIMIT` = 10, at most `RUN_LIST_MAX_LIMIT` = 50) | Runs, newest first: `name`, `status`, `trigger_id`, `reference_doctype`, `reference_name`, `creation`, `resume_at`, `sent_count`, `log`, `error`, `delivery_failed`. |
+| `retry_run` | POST | `run_name` | `{"name": <new run>}`. Only a `Failed` run, and the automation must be on. |
+| `test_automation` | GET | `doc`, `docname`, `trigger_id` | A dry run on one record. Sends nothing and writes nothing. |
+| `get_stats` | GET | none | `{"total", "active", "dispatched", "by_trigger", "doctypes"}` |
+| `get_reference_doctypes` | GET | none | DocType names the user can read. |
+| `get_doctype_fields` | GET | `doctype` | Field metadata for pickers: `fieldname`, `label`, `fieldtype`, `options`, `reqd`. |
+| `get_ig_step_meta` | GET | none | Instagram step limits and `templates_enabled`. |
+| `get_condition_edit_access` | GET | `name` (optional) | `true` when the user may edit trigger conditions. |
+
+**`doc` for `save_automation`.**
+
+- Fields: `title` (required), `description`, `disabled`, `send_frequency` (`Every time`, `Once per day`, `Once per document`), `filter_logic`, `phone_field`, `email_field`, `whatsapp_account`, `sms_account`, `skip_return_documents`.
+- Child tables: `triggers`, `filters`, `steps`, `edges`, `variable_mappings`, `recipients`, `notes`.
+- Trigger types: `Document Event`, `Field Change`, `Date Based`, `Schedule`.
+- Step types: `Send WhatsApp`, `Send Email`, `Send SMS`, `Wait`, `Wait for Event`, `If/Else`, `Switch`, `Update Field`, `Add to Recipient List`, `Send IG Public Reply`, `Send IG Consent Template`.
+- A user without permission level 1 write access cannot change a trigger `condition`. MSuite keeps the saved condition and ignores the one sent.
+
+**Mention automation.** Use a `Document Event` trigger on `Social Mention` with `doc_event` `After Insert`, and a `Send IG Public Reply` step with `ig_reply_text`. The Instagram steps need every trigger to be a `Social Mention` trigger. Turning the automation on makes MSuite reply publicly to every new mention on accounts with a live token.
+
+```json
+{
+  "title": "Mention reply",
+  "disabled": 1,
+  "triggers": [{"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "Social Mention", "doc_event": "After Insert"}],
+  "steps": [{"step_id": "s1", "step_type": "Send IG Public Reply", "ig_reply_text": "Thanks for the mention!"}],
+  "edges": [{"source_id": "t1", "source_handle": "", "target_id": "s1"}]
+}
+```
+
+The full field reference, with every trigger and step field, is in `docs/flavorz-msuite-api-for-sagar.md` in the workspace root.
 
 ### Installation
 
