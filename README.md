@@ -34,6 +34,12 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 - **Opt-out**: a recipient who opted out (Contact flag, Audience Member, or Channel Handle `opted_out`) is skipped for MARKETING templates only; utility templates and free-form text are still sent.
 - **Opt-in (AUT-119)**: MARKETING templates also need a recorded WhatsApp opt-in, or the step result is `skipped: no consent` (the dry run shows `no consent`). Opt-in means a Channel Handle with `opted_in` = 1 (set when the customer opts in through WhatsApp). Contact `consent_updated_at` does not count: SMS and Email events set it too. An opt-out always wins and keeps `skipped: opted out`. Utility, authentication and free-form sends are not affected. Turn the check off with `require_marketing_opt_in` in WhatsApp Settings (on by default; a site that has not run `bench migrate` yet behaves as on, and migrate and a fresh install write 1). Deploy `msuite_automation` and `msuite_whatsapp` together: Automation calls `has_marketing_consent`, which only the new WhatsApp version has. The check is `has_marketing_consent` in `msuite_whatsapp`, called through the WhatsApp channel app.
 
+### External API (token auth)
+
+An external user manages mention automations with the endpoints in `msuite_automation.msuite_automation.api.automations`: `save_automation`, `toggle_automation`, `get_runs`, `get_automation`, `get_automations` and `delete_automation`. A mention automation uses a `Document Event` trigger on `Social Mention` and a `Send IG Public Reply` step.
+
+The `Messaging Automation` DocType gives write access to `System Manager`, `MSuite Admin` and `WhatsApp Manager`. Give the API user one of these roles. `Social Manager` cannot manage automations. `get_runs` returns at most `RUN_LIST_MAX_LIMIT` runs per call. See `docs/flavorz-external-api.md` in the workspace root.
+
 ### Installation
 
 You can install this app using the [bench](https://github.com/frappe/bench) CLI:
