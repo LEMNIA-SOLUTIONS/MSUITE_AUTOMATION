@@ -103,6 +103,15 @@ When the flag is on, the automation for a lead depends on the schedule type of t
 
 There is no Email or SMS path in this automation.
 
+#### Automation Step Link Repointing
+
+`Automation Step` records link `target_bulk_message` to `Broadcast` and `recipient_list` to `Recipient List`.
+
+The patch `msuite_automation.patches.repoint_automation_step_links`:
+- Repoints `target_bulk_message` legacy links (e.g. `Bulk WhatsApp Message`) to unified `Broadcast` records via `msuite_campaigns.broadcast.legacy.resolve`.
+- Repoints `recipient_list` legacy links (e.g. `WhatsApp Recipient List`) to unified `Recipient List` records via `msuite_campaigns.broadcast.legacy.resolve`.
+- Unresolved legacy names are safely recorded in `unresolved` without blanking existing fields.
+
 #### Tests
 
 ```bash
