@@ -35,10 +35,10 @@ class TestBroadcastPath(unittest.TestCase):
 			if frappe.db.exists("Recipient List", name):
 				frappe.delete_doc("Recipient List", name, force=True)
 		for name in self.created_bulk_messages:
-			if frappe.db.exists("Bulk WhatsApp Message", name):
+			if frappe.db.exists("DocType", "Bulk WhatsApp Message") and frappe.db.exists("Bulk WhatsApp Message", name):
 				frappe.delete_doc("Bulk WhatsApp Message", name, force=True)
 		for name in self.created_legacy_lists:
-			if frappe.db.exists("WhatsApp Recipient List", name):
+			if frappe.db.exists("DocType", "WhatsApp Recipient List") and frappe.db.exists("WhatsApp Recipient List", name):
 				frappe.delete_doc("WhatsApp Recipient List", name, force=True)
 		frappe.db.commit()
 
@@ -80,6 +80,7 @@ class TestBroadcastPath(unittest.TestCase):
 			mobile_no=mobile_no,
 		)
 
+	@unittest.skipUnless(frappe.db.exists("DocType", "WhatsApp Recipient List"), "legacy doctype deleted")
 	def test_flag_off_calls_old_path_not_new(self):
 		"""With msuite_broadcast_enabled falsy, runs REAL legacy functions with mocked network boundary (I-05b)."""
 		legacy_list_name = f"Legacy-List-{frappe.generate_hash(length=6)}"
@@ -142,6 +143,18 @@ class TestBroadcastPath(unittest.TestCase):
 
 			# Ensure no Broadcast doc was created
 			self.assertFalse(frappe.db.exists("Broadcast", {"title": ["like", f"%{auto.name}%"]}))
+
+	def test_channels_tolerates_deleted_legacy_doctypes(self):
+		"""Verify channels functions tolerate deleted legacy DocTypes without raising DoesNotExistError."""
+		lead = self._make_lead(mobile_no="+91 98765 43210")
+		self.assertFalse(channels.is_opted_out("+919876543210", "Email"))
+		self.assertFalse(channels.is_opted_out("+919876543210", "SMS"))
+		with patch.dict(frappe.conf, {"msuite_broadcast_enabled": False}):
+			self.assertFalse(channels.add_to_list("nonexistent_list", "+919876543210", lead))
+			auto = self._make_automation()
+			step = self._make_step()
+			res = channels.dispatch_bulk(auto, step, lead, "+919876543210", {})
+			self.assertEqual(res.get("status"), "error")
 
 	def test_flag_on_immediate_launches_broadcast_and_creates_recipient(self):
 		"""With flag on, Immediate creates Individual Broadcast, launches it, and materializes recipient (C-03)."""

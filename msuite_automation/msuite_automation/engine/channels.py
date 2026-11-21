@@ -104,7 +104,7 @@ def is_opted_out(channel: str, address) -> bool:
 		# A reply or unsubscribe from an address outside every Audience only flags the Contact.
 		return (
 			(email_app.is_suppressed(email) if email_app else False)
-			or bool(frappe.db.exists("Email Recipient", {"email_address": email, "unsubscribed": 1}))
+			or (frappe.db.exists("DocType", "Email Recipient") and bool(frappe.db.exists("Email Recipient", {"email_address": email, "unsubscribed": 1})))
 			or (frappe.db.exists("DocType", "Recipient Contact") and bool(frappe.db.exists("Recipient Contact", {"email_normalized": email, "unsubscribed_email": 1})))
 			or any(
 				frappe.db.exists("Contact", {col: email, flag: 1})
@@ -140,7 +140,10 @@ def is_opted_out(channel: str, address) -> bool:
 	flag = _OPT_OUT_FIELD[channel]
 	# STOP from a number outside every Audience only flags the Contact, so check both stores.
 	return bool(
-		frappe.db.exists("Audience Member", {"phone_e164": ["in", variants], flag: 1})
+		(
+			frappe.db.exists("DocType", "Audience Member")
+			and frappe.db.exists("Audience Member", {"phone_e164": ["in", variants], flag: 1})
+		)
 		or (
 			frappe.db.exists("DocType", "Recipient Contact")
 			and frappe.db.exists("Recipient Contact", {"phone_e164": ["in", variants], flag: 1})
@@ -560,6 +563,8 @@ def add_to_list(list_name: str, phone: str, doc) -> bool:
 
 def _add_to_legacy_list(list_name: str, phone: str, doc) -> bool:
 	"""Legacy add to WhatsApp Recipient List."""
+	if not frappe.db.exists("DocType", "WhatsApp Recipient List") or not frappe.db.exists("DocType", "WhatsApp Recipient"):
+		return False
 	if frappe.db.exists("WhatsApp Recipient", {"parent": list_name, "mobile_number": phone}):
 		return False
 
@@ -704,6 +709,9 @@ def dispatch_bulk(automation, step, doc, phone: str, body_params: dict) -> dict:
 
 def _dispatch_bulk_legacy(automation, step, doc, phone: str, body_params: dict) -> dict:
 	"""Aggregate or trigger Bulk WhatsApp Message broadcast for automation rule."""
+	if not frappe.db.exists("DocType", "Bulk WhatsApp Message"):
+		return {"status": "error", "error": "Bulk WhatsApp Message DocType does not exist"}
+
 	auto_name = _get(automation, "name")
 	auto_title = _get(automation, "title")
 	wa_account = _get(automation, "whatsapp_account")
