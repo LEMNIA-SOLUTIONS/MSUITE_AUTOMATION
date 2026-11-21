@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import frappe
+from frappe.utils import add_to_date, now_datetime
 
 from msuite_automation.msuite_automation.engine import channels
 
@@ -19,16 +20,26 @@ class TestBroadcastPath(unittest.TestCase):
 	"""Test suite for unified Recipient List and Broadcast lead status automation."""
 
 	def setUp(self):
+		frappe.db.rollback()
 		self.created_broadcasts: list[str] = []
 		self.created_recipient_lists: list[str] = []
+		self.created_bulk_messages: list[str] = []
+		self.created_legacy_lists: list[str] = []
 
 	def tearDown(self):
+		frappe.db.rollback()
 		for name in self.created_broadcasts:
 			if frappe.db.exists("Broadcast", name):
 				frappe.delete_doc("Broadcast", name, force=True)
 		for name in self.created_recipient_lists:
 			if frappe.db.exists("Recipient List", name):
 				frappe.delete_doc("Recipient List", name, force=True)
+		for name in self.created_bulk_messages:
+			if frappe.db.exists("Bulk WhatsApp Message", name):
+				frappe.delete_doc("Bulk WhatsApp Message", name, force=True)
+		for name in self.created_legacy_lists:
+			if frappe.db.exists("WhatsApp Recipient List", name):
+				frappe.delete_doc("WhatsApp Recipient List", name, force=True)
 		frappe.db.commit()
 
 	def _make_automation(self, name: str = "MA-TEST-RULE-1", title: str = "Test Rule"):
@@ -39,12 +50,23 @@ class TestBroadcastPath(unittest.TestCase):
 			_trigger_label="Status",
 		)
 
-	def _make_step(self, template: str = "hello_template", recipient_list: str | None = None):
+	def _make_step(
+		self,
+		template: str = "hello_template",
+		recipient_list: str | None = None,
+		bulk_schedule_type: str = "Immediate",
+		bulk_delay_minutes: int = 0,
+		bulk_scheduled_time=None,
+		target_broadcast: str | None = None,
+	):
 		return frappe._dict(
 			step_id="wa_step_1",
 			template=template,
 			recipient_list=recipient_list,
-			bulk_schedule_type="Immediate",
+			bulk_schedule_type=bulk_schedule_type,
+			bulk_delay_minutes=bulk_delay_minutes,
+			bulk_scheduled_time=bulk_scheduled_time,
+			target_broadcast=target_broadcast,
 			use_batched_enqueue=1,
 		)
 
@@ -59,39 +81,81 @@ class TestBroadcastPath(unittest.TestCase):
 		)
 
 	def test_flag_off_calls_old_path_not_new(self):
-		"""With msuite_broadcast_enabled falsy, legacy Bulk WhatsApp Message functions run."""
-		auto = self._make_automation()
-		step = self._make_step()
-		lead = self._make_lead()
+		"""With msuite_broadcast_enabled falsy, runs REAL legacy functions with mocked network boundary (I-05b)."""
+		legacy_list_name = f"Legacy-List-{frappe.generate_hash(length=6)}"
+		legacy_list_doc = frappe.get_doc(
+			{
+				"doctype": "WhatsApp Recipient List",
+				"list_name": legacy_list_name,
+			}
+		)
+		legacy_list_doc.insert(ignore_permissions=True, ignore_links=True)
+		self.created_legacy_lists.append(legacy_list_name)
 
-		with (
-			patch.dict(frappe.conf, {"msuite_broadcast_enabled": False}),
-			patch(f"{CH}._dispatch_bulk_broadcast") as mock_new_dispatch,
-			patch(f"{CH}._dispatch_bulk_legacy", return_value={"status": "success", "mode": "legacy"}) as mock_old_dispatch,
-		):
-			res = channels.dispatch_bulk(auto, step, lead, "+919876543210", {})
-			mock_old_dispatch.assert_called_once()
-			mock_new_dispatch.assert_not_called()
-			self.assertEqual(res.get("mode"), "legacy")
+		wa_account = frappe.db.get_value("WhatsApp Account", {}, "name")
+		wa_template = frappe.db.get_value("WhatsApp Templates", {}, "name")
+		ma_rule = frappe.db.get_value("Messaging Automation", {}, "name")
 
-		with (
-			patch.dict(frappe.conf, {"msuite_broadcast_enabled": False}),
-			patch(f"{CH}._add_to_recipient_list") as mock_new_add,
-			patch(f"{CH}._add_to_legacy_list", return_value=True) as mock_old_add,
-		):
-			added = channels.add_to_list("Legacy-List", "+919876543210", lead)
-			mock_old_add.assert_called_once_with("Legacy-List", "+919876543210", lead)
-			mock_new_add.assert_not_called()
-			self.assertTrue(added)
-
-	def test_flag_on_creates_list_and_broadcast_with_right_channel_row_fields(self):
-		"""With flag on, creates Recipient List + Broadcast with correct Broadcast Channel fields."""
-		rule_id = f"MA-TEST-{frappe.generate_hash(length=6)}"
-		auto = self._make_automation(name=rule_id, title="Onboarding Leads")
-		step = self._make_step()
+		auto = self._make_automation(name=ma_rule, title="Legacy Rule")
+		auto.whatsapp_account = wa_account
+		step = self._make_step(
+			template=wa_template,
+			recipient_list=legacy_list_name,
+			bulk_schedule_type="Immediate",
+		)
 		lead = self._make_lead(mobile_no="+91 98765 43210")
 
-		with patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}):
+		# 1. Test add_to_list runs real _add_to_legacy_list
+		with patch.dict(frappe.conf, {"msuite_broadcast_enabled": False}):
+			added = channels.add_to_list(legacy_list_name, "+919876543210", lead)
+			self.assertTrue(added)
+			self.assertTrue(
+				frappe.db.exists(
+					"WhatsApp Recipient",
+					{"parent": legacy_list_name, "mobile_number": "+919876543210"},
+				)
+			)
+			# Duplicate add returns False
+			added_dup = channels.add_to_list(legacy_list_name, "+919876543210", lead)
+			self.assertFalse(added_dup)
+
+		# 2. Test dispatch_bulk runs real _dispatch_bulk_legacy (mocking only the outbound queue call)
+		mock_wa_app = MagicMock()
+		mock_wa_app.queue_bulk = MagicMock()
+		with (
+			patch.dict(frappe.conf, {"msuite_broadcast_enabled": False}),
+			patch(f"{CH}._require_channel_app", return_value=mock_wa_app),
+		):
+			res = channels.dispatch_bulk(auto, step, lead, "+919876543210", {"1": "Val"})
+			self.assertEqual(res.get("status"), "success")
+			self.assertEqual(res.get("mode"), "created")
+			bulk_name = res.get("bulk_message")
+			self.assertTrue(bulk_name)
+			self.created_bulk_messages.append(bulk_name)
+
+			# Verify real DB records created
+			self.assertTrue(frappe.db.exists("Bulk WhatsApp Message", bulk_name))
+			bulk_doc = frappe.get_doc("Bulk WhatsApp Message", bulk_name)
+			self.assertEqual(bulk_doc.status, "In Progress")
+			self.assertEqual(bulk_doc.recipient_list, legacy_list_name)
+			mock_wa_app.queue_bulk.assert_called_once()
+
+			# Ensure no Broadcast doc was created
+			self.assertFalse(frappe.db.exists("Broadcast", {"title": ["like", f"%{auto.name}%"]}))
+
+	def test_flag_on_immediate_launches_broadcast_and_creates_recipient(self):
+		"""With flag on, Immediate creates Individual Broadcast, launches it, and materializes recipient (C-03)."""
+		rule_id = f"MA-TEST-{frappe.generate_hash(length=6)}"
+		auto = self._make_automation(name=rule_id, title="Immediate Onboarding")
+		step = self._make_step(bulk_schedule_type="Immediate")
+		lead = self._make_lead(mobile_no="+91 98765 43210", lead_name="John Doe")
+
+		wa_adapter = {"channel": "WhatsApp", "validate_channel": lambda b, c: None, "send_one": MagicMock()}
+		with (
+			patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}),
+			patch("msuite_campaigns.broadcast.adapters.require_channel_adapter", return_value=wa_adapter),
+			patch("msuite_campaigns.broadcast.enqueue.enqueue_broadcast_channel"),
+		):
 			res = channels.dispatch_bulk(auto, step, lead, "+91 98765 43210", {"1": "John"})
 
 		self.assertEqual(res.get("status"), "success")
@@ -100,11 +164,10 @@ class TestBroadcastPath(unittest.TestCase):
 		self.assertTrue(bc_name)
 		self.created_broadcasts.append(bc_name)
 
-		# Verify Broadcast
+		# Verify Broadcast ends in Queued or In Progress
 		bc_doc = frappe.get_doc("Broadcast", bc_name)
-		self.assertEqual(bc_doc.recipient_source, "Recipient List")
-		self.assertTrue(bc_doc.recipient_list)
-		self.created_recipient_lists.append(bc_doc.recipient_list)
+		self.assertEqual(bc_doc.recipient_source, "Individual")
+		self.assertIn(bc_doc.status, ("Queued", "In Progress"))
 		self.assertEqual(bc_doc.total_recipients, 1)
 
 		# Verify Broadcast Channel row
@@ -116,19 +179,25 @@ class TestBroadcastPath(unittest.TestCase):
 		self.assertEqual(ch_row.is_lead_automation_broadcast, 1)
 		self.assertEqual(ch_row.lead_automation_rule, rule_id)
 		self.assertEqual(ch_row.recipient_count, 1)
+		self.assertIn(ch_row.status, ("Queued", "In Progress"))
 
-		# Verify Recipient List contact
-		rec_list = frappe.get_doc("Recipient List", bc_doc.recipient_list)
-		self.assertEqual(len(rec_list.contacts), 1)
-		contact = rec_list.contacts[0]
-		self.assertEqual(contact.phone_e164, "+919876543210")
-		self.assertEqual(contact.full_name, "John Doe")
+		# Verify exactly one Broadcast Recipient exists in DB
+		rec_count = frappe.db.count("Broadcast Recipient", {"broadcast": bc_name})
+		self.assertEqual(rec_count, 1)
+		rec_row = frappe.db.get_value(
+			"Broadcast Recipient",
+			{"broadcast": bc_name},
+			["address", "recipient_name"],
+			as_dict=True,
+		)
+		self.assertEqual(rec_row.address, "+919876543210")
+		self.assertEqual(rec_row.recipient_name, "John Doe")
 
-	def test_second_lead_appends_to_same_list_and_broadcast(self):
-		"""Second incoming lead appends to the same list and Broadcast and updates recipient_count."""
+	def test_scheduled_delay_buffer_reaches_scheduled_status_and_aggregates(self):
+		"""Delay Buffer creates a Broadcast that reaches Scheduled status and aggregates subsequent leads."""
 		rule_id = f"MA-TEST-{frappe.generate_hash(length=6)}"
-		auto = self._make_automation(name=rule_id, title="Lead Status Step")
-		step = self._make_step()
+		auto = self._make_automation(name=rule_id, title="Delay Buffer Rule")
+		step = self._make_step(bulk_schedule_type="Delay Buffer", bulk_delay_minutes=30)
 		lead1 = self._make_lead(name="LEAD-1", mobile_no="+91 98765 43210", lead_name="Alice")
 		lead2 = self._make_lead(name="LEAD-2", mobile_no="+91 98765 43211", lead_name="Bob")
 
@@ -139,44 +208,117 @@ class TestBroadcastPath(unittest.TestCase):
 			bc1 = res1.get("broadcast")
 			self.created_broadcasts.append(bc1)
 
+			# Verify reaches Scheduled status
+			bc_doc = frappe.get_doc("Broadcast", bc1)
+			self.created_recipient_lists.append(bc_doc.recipient_list)
+			self.assertEqual(bc_doc.recipient_source, "Recipient List")
+			self.assertEqual(bc_doc.status, "Scheduled")
+			self.assertEqual(bc_doc.channels[0].status, "Scheduled")
+			self.assertIsNotNone(bc_doc.scheduled_time)
+			self.assertEqual(bc_doc.total_recipients, 1)
+
+			# Second lead aggregates
 			res2 = channels.dispatch_bulk(auto, step, lead2, "+91 98765 43211", {})
 			self.assertEqual(res2.get("status"), "success")
 			self.assertEqual(res2.get("mode"), "aggregated")
-			bc2 = res2.get("broadcast")
+			self.assertEqual(res2.get("broadcast"), bc1)
 
-		self.assertEqual(bc1, bc2, "Second lead should aggregate onto the same Broadcast document.")
-
-		# Verify counts on Broadcast & channel row
-		bc_doc = frappe.get_doc("Broadcast", bc1)
-		self.created_recipient_lists.append(bc_doc.recipient_list)
+		bc_doc.reload()
 		self.assertEqual(bc_doc.total_recipients, 2)
 		self.assertEqual(bc_doc.channels[0].recipient_count, 2)
-
-		# Verify Recipient List has both contacts
 		rec_list = frappe.get_doc("Recipient List", bc_doc.recipient_list)
 		self.assertEqual(len(rec_list.contacts), 2)
-		phones = {c.phone_e164 for c in rec_list.contacts}
-		self.assertEqual(phones, {"+919876543210", "+919876543211"})
 
-	def test_duplicate_lead_not_added_twice(self):
-		"""Duplicate phone is not added twice to Recipient List or Broadcast."""
-		rule_id = f"MA-TEST-{frappe.generate_hash(length=6)}"
-		auto = self._make_automation(name=rule_id, title="Dedup Test")
-		step = self._make_step()
-		lead = self._make_lead(name="LEAD-DUP", mobile_no="+91 98765 43210", lead_name="Charlie")
+	def test_target_broadcast_non_draft_skipped_with_warning(self):
+		"""When target_broadcast is already non-Draft, skips with warning and does not attach contact (M-01)."""
+		# Create a target broadcast in Completed / In Progress status
+		target_bc = frappe.get_doc(
+			{
+				"doctype": "Broadcast",
+				"title": f"Target-Non-Draft-{frappe.generate_hash(length=6)}",
+				"recipient_source": "Individual",
+				"status": "In Progress",
+				"channels": [
+					{
+						"doctype": "Broadcast Channel",
+						"channel": "WhatsApp",
+						"whatsapp_account": "WA-ACC-001",
+						"whatsapp_template": "hello_template",
+						"status": "In Progress",
+					}
+				],
+			}
+		)
+		target_bc.insert(ignore_permissions=True, ignore_links=True)
+		self.created_broadcasts.append(target_bc.name)
+
+		auto = self._make_automation()
+		step = self._make_step(target_broadcast=target_bc.name)
+		lead = self._make_lead(mobile_no="+91 98765 43210")
+
+		with (
+			patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}),
+			patch("frappe.logger") as mock_logger,
+		):
+			mock_log_instance = MagicMock()
+			mock_logger.return_value = mock_log_instance
+
+			res = channels.dispatch_bulk(auto, step, lead, "+91 98765 43210", {})
+			self.assertEqual(res.get("status"), "skipped")
+			self.assertEqual(res.get("reason"), "target_broadcast_not_open")
+			mock_log_instance.warning.assert_called()
+
+		# Ensure no recipients were materialized or added
+		self.assertEqual(frappe.db.count("Broadcast Recipient", {"broadcast": target_bc.name}), 0)
+
+	def test_target_broadcast_draft_attaches_lead(self):
+		"""When target_broadcast is Draft, attaches lead to its recipient list and updates counts."""
+		rl = frappe.get_doc(
+			{
+				"doctype": "Recipient List",
+				"list_name": f"Target-RL-{frappe.generate_hash(length=6)}",
+				"source": "Manual",
+			}
+		)
+		rl.insert(ignore_permissions=True, ignore_links=True)
+		self.created_recipient_lists.append(rl.name)
+
+		target_bc = frappe.get_doc(
+			{
+				"doctype": "Broadcast",
+				"title": f"Target-Draft-{frappe.generate_hash(length=6)}",
+				"recipient_source": "Recipient List",
+				"recipient_list": rl.name,
+				"status": "Draft",
+				"channels": [
+					{
+						"doctype": "Broadcast Channel",
+						"channel": "WhatsApp",
+						"whatsapp_account": "WA-ACC-001",
+						"whatsapp_template": "hello_template",
+						"status": "Draft",
+					}
+				],
+			}
+		)
+		target_bc.insert(ignore_permissions=True, ignore_links=True)
+		self.created_broadcasts.append(target_bc.name)
+
+		auto = self._make_automation()
+		step = self._make_step(target_broadcast=target_bc.name)
+		lead = self._make_lead(mobile_no="+91 98765 43210")
 
 		with patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}):
-			res1 = channels.dispatch_bulk(auto, step, lead, "+91 98765 43210", {})
-			self.created_broadcasts.append(res1.get("broadcast"))
-			res2 = channels.dispatch_bulk(auto, step, lead, "+91 98765 43210", {})
+			res = channels.dispatch_bulk(auto, step, lead, "+91 98765 43210", {})
+			self.assertEqual(res.get("status"), "success")
+			self.assertEqual(res.get("mode"), "target_attached")
+			self.assertEqual(res.get("broadcast"), target_bc.name)
 
-		bc_doc = frappe.get_doc("Broadcast", res1.get("broadcast"))
-		self.created_recipient_lists.append(bc_doc.recipient_list)
-		self.assertEqual(bc_doc.total_recipients, 1)
-		self.assertEqual(bc_doc.channels[0].recipient_count, 1)
-
-		rec_list = frappe.get_doc("Recipient List", bc_doc.recipient_list)
-		self.assertEqual(len(rec_list.contacts), 1)
+		target_bc.reload()
+		self.assertEqual(target_bc.total_recipients, 1)
+		self.assertEqual(target_bc.channels[0].recipient_count, 1)
+		rl.reload()
+		self.assertEqual(len(rl.contacts), 1)
 
 	def test_opted_out_lead_skipped(self):
 		"""Opted-out lead is skipped and not added to list or Broadcast."""

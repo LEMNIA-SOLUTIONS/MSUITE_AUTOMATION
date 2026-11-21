@@ -843,10 +843,12 @@ def _dispatch_bulk_legacy(automation, step, doc, phone: str, body_params: dict) 
 def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dict) -> dict:
 	"""Unified Broadcast implementation for lead status automation.
 
-	Finds or creates a Recipient List for the rule, appends the lead's number as
-	a contact (deduped, E.164), finds or creates the target Draft/Scheduled Broadcast
-	for the rule (+ one Broadcast Channel WhatsApp row with is_lead_automation_broadcast=1
-	and lead_automation_rule), and updates recipient_count.
+	Dispatches lead-status automation triggers via the unified Broadcast system.
+	- For Immediate schedule: creates a single-recipient Individual Broadcast,
+	  materializes and launches it via msuite_campaigns.broadcast.hub.launch.
+	- For Scheduled Time / Delay Buffer: maintains a Recipient List, adds contacts,
+	  aggregates onto existing open Broadcast or creates a new one reaching Scheduled status.
+	- For target_broadcast: attaches to open Draft broadcast; skips non-Draft broadcasts with a warning.
 
 	Args:
 		automation: Messaging Automation document or dict.
@@ -859,7 +861,8 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 		dict: Result dict containing status, broadcast, bulk_message, and mode.
 
 	Side Effects:
-		Creates or updates Recipient List, Recipient Contact, Broadcast, and Broadcast Channel.
+		Creates or updates Recipient List, Recipient Contact, Broadcast, Broadcast Channel,
+		and Broadcast Recipient rows in the database.
 	"""
 	auto_name = _get(automation, "name")
 	auto_title = _get(automation, "title")
@@ -901,58 +904,25 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 		)
 		return {"status": "skipped", "reason": "opted_out"}
 
-	# 3. Find-or-create the Recipient List for the rule
-	target_list_name = recipient_list_name or f"{rule_name} Recipient List"
-	try:
-		if frappe.db.exists("Recipient List", target_list_name):
-			list_doc = frappe.get_doc("Recipient List", target_list_name)
-		else:
-			list_doc = frappe.get_doc(
-				{
-					"doctype": "Recipient List",
-					"list_name": target_list_name,
-					"source": "Manual",
-				}
-			)
-			list_doc.insert(ignore_permissions=True, ignore_links=True)
-
-		# Append lead's number as contact (deduped, E.164)
-		display_name = _lead_display_name(doc, fallback_to_name=True)
-		already_in_list = any(c.phone_e164 == phone_e164 for c in (list_doc.contacts or [])) or bool(
-			frappe.db.exists(
-				"Recipient Contact",
-				{
-					"parent": target_list_name,
-					"parenttype": "Recipient List",
-					"phone_e164": phone_e164,
-				},
-			)
-		)
-		if not already_in_list:
-			list_doc.add_contacts(
-				[
-					{
-						"full_name": display_name,
-						"raw_phone": phone_e164,
-						"recipient_data": _lead_recipient_data(doc),
-					}
-				]
-			)
-			list_doc.save(ignore_permissions=True)
-			list_doc.recompute_rollups()
-	except Exception as e:
-		frappe.logger(LOGGER_NAME).warning(
-			f"[Lead Status Automation] Could not manage recipient list {target_list_name}: {e}"
-		)
-		return {"status": "failed", "reason": f"recipient_list_error: {str(e)}"}
-
-	rec_count = len(list_doc.contacts or [])
-	if rec_count == 0:
-		rec_count = 1
-
-	# 4. Find-or-create target Draft/Scheduled Broadcast for the rule
+	# 3. Target broadcast check (M-01)
 	if target_bc and frappe.db.exists("Broadcast", target_bc):
 		target_doc = frappe.get_doc("Broadcast", target_bc)
+		if target_doc.status != "Draft":
+			frappe.logger(LOGGER_NAME).warning(
+				f"[Lead Status Automation] Target broadcast '{target_doc.name}' is in status '{target_doc.status}' (non-Draft), skipping."
+			)
+			return {"status": "skipped", "reason": "target_broadcast_not_open"}
+
+		target_list_name = target_doc.recipient_list or recipient_list_name or f"{rule_name} Recipient List"
+		_add_to_recipient_list(target_list_name, phone_e164, doc)
+		rec_count = (
+			frappe.db.count(
+				"Recipient Contact",
+				{"parent": target_list_name, "parenttype": "Recipient List"},
+			)
+			or 1
+		)
+
 		for ch in (target_doc.channels or []):
 			if ch.channel == "WhatsApp":
 				ch.recipient_count = rec_count
@@ -979,6 +949,124 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 			"bulk_message": target_doc.name,
 			"mode": "target_attached",
 		}
+
+	display_name = _lead_display_name(doc, fallback_to_name=True)
+
+	# 4. Immediate delivery mode (C-03)
+	if schedule_type == "Immediate":
+		bulk_title = f"{rule_name} - {trigger_label} Broadcast"
+		try:
+			broadcast_doc = frappe.get_doc(
+				{
+					"doctype": "Broadcast",
+					"title": bulk_title,
+					"campaign": campaign or None,
+					"recipient_source": "Individual",
+					"status": "Draft",
+					"total_recipients": 1,
+					"channels": [
+						{
+							"doctype": "Broadcast Channel",
+							"channel": "WhatsApp",
+							"whatsapp_account": wa_account or None,
+							"whatsapp_template": template_name,
+							"status": "Draft",
+							"use_batched_enqueue": use_batched,
+							"recipient_count": 1,
+							"is_lead_automation_broadcast": 1,
+							"lead_automation_rule": auto_name,
+							"template_variables": json.dumps(body_params) if body_params else "{}",
+						}
+					],
+				}
+			)
+			broadcast_doc.insert(ignore_permissions=True, ignore_links=True)
+
+			from msuite_campaigns.broadcast import hub
+
+			individual_rows = [
+				{
+					"address": phone_e164,
+					"recipient_name": display_name or "",
+					"recipient_data": json.dumps(_lead_recipient_data(doc)),
+				}
+			]
+			launch_res = hub.launch(broadcast_doc.name, individual_rows=individual_rows)
+			wa_res = (launch_res or {}).get("WhatsApp", {})
+			if wa_res.get("error"):
+				frappe.logger(LOGGER_NAME).error(
+					f"[Lead Status Automation] Failed to launch Broadcast '{broadcast_doc.name}' for rule '{rule_name}': {wa_res['error']}"
+				)
+				return {
+					"status": "failed",
+					"reason": f"launch_error: {wa_res['error']}",
+					"broadcast": broadcast_doc.name,
+					"bulk_message": broadcast_doc.name,
+				}
+
+			frappe.logger(LOGGER_NAME).info(
+				f"[Lead Status Automation] Created and launched Broadcast '{broadcast_doc.name}' for rule '{rule_name}'."
+			)
+			return {
+				"status": "success",
+				"broadcast": broadcast_doc.name,
+				"bulk_message": broadcast_doc.name,
+				"mode": "created",
+			}
+		except Exception as e:
+			frappe.logger(LOGGER_NAME).error(
+				f"[Lead Status Automation] Failed to create Broadcast for rule '{rule_name}': {e}",
+				exc_info=True,
+			)
+			return {"status": "failed", "reason": f"broadcast_create_error: {str(e)}"}
+
+	# 5. Scheduled Time / Delay Buffer delivery mode: aggregate into Recipient List + Broadcast
+	target_list_name = recipient_list_name or f"{rule_name} Recipient List"
+	try:
+		if frappe.db.exists("Recipient List", target_list_name):
+			list_doc = frappe.get_doc("Recipient List", target_list_name)
+		else:
+			list_doc = frappe.get_doc(
+				{
+					"doctype": "Recipient List",
+					"list_name": target_list_name,
+					"source": "Manual",
+				}
+			)
+			list_doc.insert(ignore_permissions=True, ignore_links=True)
+
+		# Append lead's number as contact (deduped, E.164)
+		already_in_list = any(c.phone_e164 == phone_e164 for c in (list_doc.contacts or [])) or bool(
+			frappe.db.exists(
+				"Recipient Contact",
+				{
+					"parent": target_list_name,
+					"parenttype": "Recipient List",
+					"phone_e164": phone_e164,
+				},
+			)
+		)
+		if not already_in_list:
+			list_doc.add_contacts(
+				[
+					{
+						"full_name": display_name,
+						"raw_phone": phone_e164,
+						"recipient_data": _lead_recipient_data(doc),
+					}
+				]
+			)
+			list_doc.save(ignore_permissions=True)
+			# Note: list_doc.recompute_rollups() removed per M-02
+	except Exception as e:
+		frappe.logger(LOGGER_NAME).warning(
+			f"[Lead Status Automation] Could not manage recipient list {target_list_name}: {e}"
+		)
+		return {"status": "failed", "reason": f"recipient_list_error: {str(e)}"}
+
+	rec_count = len(list_doc.contacts or [])
+	if rec_count == 0:
+		rec_count = 1
 
 	# Check for existing open Draft/Scheduled Broadcast for this rule
 	existing_bc_rows = frappe.db.sql(
@@ -1030,15 +1118,12 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 
 	# Calculate scheduled time if applicable
 	exec_scheduled_time = None
-	initial_status = "Draft"
 	if schedule_type == "Scheduled Time" and scheduled_time:
 		exec_scheduled_time = scheduled_time
-		initial_status = "Scheduled"
 	elif schedule_type == "Delay Buffer" and delay_mins > 0:
 		from frappe.utils import add_to_date, now_datetime
 
 		exec_scheduled_time = add_to_date(now_datetime(), minutes=delay_mins)
-		initial_status = "Scheduled"
 
 	bulk_title = f"{rule_name} - {trigger_label} Broadcast"
 
@@ -1050,7 +1135,7 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 				"campaign": campaign or None,
 				"recipient_source": "Recipient List",
 				"recipient_list": target_list_name,
-				"status": initial_status,
+				"status": "Draft",
 				"scheduled_time": exec_scheduled_time,
 				"total_recipients": rec_count,
 				"channels": [
@@ -1059,7 +1144,7 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 						"channel": "WhatsApp",
 						"whatsapp_account": wa_account or None,
 						"whatsapp_template": template_name,
-						"status": initial_status,
+						"status": "Draft",
 						"use_batched_enqueue": use_batched,
 						"recipient_count": rec_count,
 						"is_lead_automation_broadcast": 1,
@@ -1070,6 +1155,11 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 			}
 		)
 		broadcast_doc.insert(ignore_permissions=True, ignore_links=True)
+
+		if exec_scheduled_time:
+			from msuite_campaigns.broadcast import lifecycle
+
+			lifecycle.launch(broadcast_doc.name)
 
 		frappe.logger(LOGGER_NAME).info(
 			f"[Lead Status Automation] Created Broadcast '{broadcast_doc.name}' for rule '{rule_name}'."
