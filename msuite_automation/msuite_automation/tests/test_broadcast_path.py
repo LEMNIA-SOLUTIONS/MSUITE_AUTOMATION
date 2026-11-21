@@ -201,7 +201,13 @@ class TestBroadcastPath(unittest.TestCase):
 		lead1 = self._make_lead(name="LEAD-1", mobile_no="+91 98765 43210", lead_name="Alice")
 		lead2 = self._make_lead(name="LEAD-2", mobile_no="+91 98765 43211", lead_name="Bob")
 
-		with patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}):
+		wa_adapter = {"channel": "WhatsApp", "validate_channel": lambda b, c: None, "send_one": MagicMock()}
+
+		with (
+			patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}),
+			patch("msuite_campaigns.broadcast.adapters.require_channel_adapter", return_value=wa_adapter),
+			patch("msuite_campaigns.broadcast.adapters.get_channel_adapter", return_value=wa_adapter),
+		):
 			res1 = channels.dispatch_bulk(auto, step, lead1, "+91 98765 43210", {})
 			self.assertEqual(res1.get("status"), "success")
 			self.assertEqual(res1.get("mode"), "created")
@@ -217,6 +223,10 @@ class TestBroadcastPath(unittest.TestCase):
 			self.assertIsNotNone(bc_doc.scheduled_time)
 			self.assertEqual(bc_doc.total_recipients, 1)
 
+			# Verify Broadcast Recipient is materialized
+			rec_rows_1 = frappe.get_all("Broadcast Recipient", filters={"broadcast": bc1}, pluck="address")
+			self.assertEqual(rec_rows_1, ["+919876543210"])
+
 			# Second lead aggregates
 			res2 = channels.dispatch_bulk(auto, step, lead2, "+91 98765 43211", {})
 			self.assertEqual(res2.get("status"), "success")
@@ -228,6 +238,168 @@ class TestBroadcastPath(unittest.TestCase):
 		self.assertEqual(bc_doc.channels[0].recipient_count, 2)
 		rec_list = frappe.get_doc("Recipient List", bc_doc.recipient_list)
 		self.assertEqual(len(rec_list.contacts), 2)
+
+		rec_rows_2 = sorted(frappe.get_all("Broadcast Recipient", filters={"broadcast": bc1}, pluck="address"))
+		self.assertEqual(rec_rows_2, ["+919876543210", "+919876543211"])
+
+	def test_scheduled_time_lead_automation_materializes_and_scheduler_dispatches(self):
+		"""Scheduled Time rule materializes lead 1 and lead 2, aggregates them, and scheduler dispatches to adapter."""
+		rule_id = f"MA-TEST-{frappe.generate_hash(length=6)}"
+		auto = self._make_automation(name=rule_id, title="Scheduled Rule")
+		scheduled_time = add_to_date(now_datetime(), hours=2)
+		step = self._make_step(
+			bulk_schedule_type="Scheduled Time",
+			bulk_scheduled_time=scheduled_time,
+		)
+		lead1 = self._make_lead(name="LEAD-1", mobile_no="+91 98765 43210", lead_name="Alice")
+		lead2 = self._make_lead(name="LEAD-2", mobile_no="+91 98765 43211", lead_name="Bob")
+
+		wa_adapter = {
+			"channel": "WhatsApp",
+			"validate_channel": lambda b, c: None,
+			"send_one": MagicMock(return_value={"status": "Sent", "message_id": "MSG-001"}),
+		}
+
+		with (
+			patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}),
+			patch("msuite_campaigns.broadcast.adapters.require_channel_adapter", return_value=wa_adapter),
+			patch("msuite_campaigns.broadcast.adapters.get_channel_adapter", return_value=wa_adapter),
+		):
+			# 1. Lead 1 dispatched
+			res1 = channels.dispatch_bulk(auto, step, lead1, "+91 98765 43210", {})
+			self.assertEqual(res1.get("status"), "success")
+			self.assertEqual(res1.get("mode"), "created")
+			bc_name = res1.get("broadcast")
+			self.created_broadcasts.append(bc_name)
+
+			# Assert after Lead 1
+			bc_doc = frappe.get_doc("Broadcast", bc_name)
+			self.created_recipient_lists.append(bc_doc.recipient_list)
+			self.assertEqual(bc_doc.status, "Scheduled")
+			self.assertEqual(bc_doc.channels[0].status, "Scheduled")
+			self.assertEqual(bc_doc.channels[0].recipient_count, 1)
+			self.assertEqual(bc_doc.total_recipients, 1)
+
+			rec_addrs_1 = frappe.get_all("Broadcast Recipient", filters={"broadcast": bc_name}, pluck="address")
+			self.assertEqual(rec_addrs_1, ["+919876543210"])
+
+			# 2. Lead 2 dispatched (aggregates to the same broadcast)
+			res2 = channels.dispatch_bulk(auto, step, lead2, "+91 98765 43211", {})
+			self.assertEqual(res2.get("status"), "success")
+			self.assertEqual(res2.get("mode"), "aggregated")
+			self.assertEqual(res2.get("broadcast"), bc_name)
+
+			# Assert after Lead 2
+			bc_doc.reload()
+			self.assertEqual(bc_doc.status, "Scheduled")
+			self.assertEqual(bc_doc.channels[0].status, "Scheduled")
+			self.assertEqual(bc_doc.channels[0].recipient_count, 2)
+			self.assertEqual(bc_doc.total_recipients, 2)
+
+			rec_addrs_2 = sorted(frappe.get_all("Broadcast Recipient", filters={"broadcast": bc_name}, pluck="address"))
+			self.assertEqual(rec_addrs_2, ["+919876543210", "+919876543211"])
+
+			# 3. Patch clock past scheduled_time and run scheduler
+			from msuite_campaigns.broadcast.scheduler import start_due_channels
+
+			def synchronous_enqueue(fn, **kwargs):
+				if fn.__name__ == "run_chunk":
+					fn(
+						broadcast=kwargs["broadcast"],
+						channel=kwargs["channel"],
+						first_name=kwargs["first_name"],
+						last_name=kwargs["last_name"],
+					)
+
+			future_now = add_to_date(scheduled_time, minutes=5)
+			with (
+				patch("msuite_campaigns.broadcast.scheduler.now_datetime", return_value=future_now),
+				patch("frappe.enqueue", side_effect=synchronous_enqueue),
+			):
+				started = start_due_channels()
+				self.assertGreaterEqual(started, 1)
+
+			# Channel should now be In Progress
+			bc_doc.reload()
+			self.assertEqual(bc_doc.channels[0].status, "In Progress")
+
+			# Verify both recipients were handed to the fake adapter
+			self.assertEqual(wa_adapter["send_one"].call_count, 2)
+			delivered_addresses = sorted(
+				call.args[2]["address"] for call in wa_adapter["send_one"].call_args_list
+			)
+			self.assertEqual(delivered_addresses, ["+919876543210", "+919876543211"])
+
+	def test_scheduled_lead_automation_hub_launch_error_returns_error_status(self):
+		"""When hub.launch reports an error for scheduled broadcast, logs and returns legacy error result."""
+		rule_id = f"MA-TEST-{frappe.generate_hash(length=6)}"
+		auto = self._make_automation(name=rule_id, title="Error Launch Rule")
+		scheduled_time = add_to_date(now_datetime(), hours=2)
+		step = self._make_step(
+			bulk_schedule_type="Scheduled Time",
+			bulk_scheduled_time=scheduled_time,
+		)
+		lead1 = self._make_lead(name="LEAD-1", mobile_no="+91 98765 43210", lead_name="Alice")
+
+		error_res = {
+			"WhatsApp": {
+				"status": "Draft",
+				"queued": 0,
+				"dropped": 0,
+				"error": "Plan quota exceeded for WhatsApp",
+			}
+		}
+
+		with (
+			patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}),
+			patch("msuite_campaigns.broadcast.hub.launch", return_value=error_res) as mock_launch,
+			patch("frappe.logger") as mock_logger,
+		):
+			mock_log_instance = MagicMock()
+			mock_logger.return_value = mock_log_instance
+
+			res = channels.dispatch_bulk(auto, step, lead1, "+91 98765 43210", {})
+			self.assertEqual(res.get("status"), "error")
+			self.assertIn("launch_error: Plan quota exceeded for WhatsApp", res.get("reason", ""))
+			bc_name = res.get("broadcast")
+			self.assertTrue(bc_name)
+			self.created_broadcasts.append(bc_name)
+			mock_log_instance.error.assert_called()
+
+	def test_scheduled_lead_automation_hub_launch_zero_queued_logs_warning(self):
+		"""When hub.launch reports queued == 0, logs a warning."""
+		rule_id = f"MA-TEST-{frappe.generate_hash(length=6)}"
+		auto = self._make_automation(name=rule_id, title="Zero Queued Rule")
+		scheduled_time = add_to_date(now_datetime(), hours=2)
+		step = self._make_step(
+			bulk_schedule_type="Scheduled Time",
+			bulk_scheduled_time=scheduled_time,
+		)
+		lead1 = self._make_lead(name="LEAD-1", mobile_no="+91 98765 43210", lead_name="Alice")
+
+		zero_res = {
+			"WhatsApp": {
+				"status": "Draft",
+				"queued": 0,
+				"dropped": 1,
+				"error": None,
+			}
+		}
+
+		with (
+			patch.dict(frappe.conf, {"msuite_broadcast_enabled": True}),
+			patch("msuite_campaigns.broadcast.hub.launch", return_value=zero_res),
+			patch("frappe.logger") as mock_logger,
+		):
+			mock_log_instance = MagicMock()
+			mock_logger.return_value = mock_log_instance
+
+			res = channels.dispatch_bulk(auto, step, lead1, "+91 98765 43210", {})
+			self.assertEqual(res.get("status"), "success")
+			bc_name = res.get("broadcast")
+			self.assertTrue(bc_name)
+			self.created_broadcasts.append(bc_name)
+			mock_log_instance.warning.assert_called()
 
 	def test_target_broadcast_non_draft_skipped_with_warning(self):
 		"""When target_broadcast is already non-Draft, skips with warning and does not attach contact (M-01)."""

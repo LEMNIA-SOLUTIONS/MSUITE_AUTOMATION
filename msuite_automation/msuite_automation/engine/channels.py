@@ -847,7 +847,8 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 	- For Immediate schedule: creates a single-recipient Individual Broadcast,
 	  materializes and launches it via msuite_campaigns.broadcast.hub.launch.
 	- For Scheduled Time / Delay Buffer: maintains a Recipient List, adds contacts,
-	  aggregates onto existing open Broadcast or creates a new one reaching Scheduled status.
+	  aggregates onto existing open Broadcast or creates a new one reaching Scheduled status,
+	  materializing recipients and launching via msuite_campaigns.broadcast.hub.launch.
 	- For target_broadcast: attaches to open Draft broadcast; skips non-Draft broadcasts with a warning.
 
 	Args:
@@ -1106,6 +1107,25 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 		existing_doc.total_recipients = rec_count
 		frappe.db.set_value("Broadcast", existing_doc.name, "total_recipients", rec_count)
 
+		from msuite_campaigns.broadcast import hub
+
+		launch_res = hub.launch(existing_name)
+		wa_res = (launch_res or {}).get("WhatsApp", {})
+		if wa_res.get("error"):
+			frappe.logger(LOGGER_NAME).error(
+				f"[Lead Status Automation] Failed to launch Broadcast '{existing_name}' for rule '{rule_name}': {wa_res['error']}"
+			)
+			return {
+				"status": "error",
+				"reason": f"launch_error: {wa_res['error']}",
+				"broadcast": existing_name,
+				"bulk_message": existing_name,
+			}
+		if wa_res.get("queued", 0) == 0:
+			frappe.logger(LOGGER_NAME).warning(
+				f"[Lead Status Automation] No recipients queued for Broadcast '{existing_name}' on rule '{rule_name}'."
+			)
+
 		frappe.logger(LOGGER_NAME).info(
 			f"[Lead Status Automation] Aggregated lead to existing Broadcast '{existing_name}'."
 		)
@@ -1157,9 +1177,24 @@ def _dispatch_bulk_broadcast(automation, step, doc, phone: str, body_params: dic
 		broadcast_doc.insert(ignore_permissions=True, ignore_links=True)
 
 		if exec_scheduled_time:
-			from msuite_campaigns.broadcast import lifecycle
+			from msuite_campaigns.broadcast import hub
 
-			lifecycle.launch(broadcast_doc.name)
+			launch_res = hub.launch(broadcast_doc.name)
+			wa_res = (launch_res or {}).get("WhatsApp", {})
+			if wa_res.get("error"):
+				frappe.logger(LOGGER_NAME).error(
+					f"[Lead Status Automation] Failed to launch Broadcast '{broadcast_doc.name}' for rule '{rule_name}': {wa_res['error']}"
+				)
+				return {
+					"status": "error",
+					"reason": f"launch_error: {wa_res['error']}",
+					"broadcast": broadcast_doc.name,
+					"bulk_message": broadcast_doc.name,
+				}
+			if wa_res.get("queued", 0) == 0:
+				frappe.logger(LOGGER_NAME).warning(
+					f"[Lead Status Automation] No recipients queued for Broadcast '{broadcast_doc.name}' on rule '{rule_name}'."
+				)
 
 		frappe.logger(LOGGER_NAME).info(
 			f"[Lead Status Automation] Created Broadcast '{broadcast_doc.name}' for rule '{rule_name}'."
