@@ -95,14 +95,13 @@ The full field reference, with every trigger and step field, is in `docs/flavorz
 
 #### Flagged Lead-Status Automation Path
 
-When the flag is on, the automation does these steps for a lead:
+When the flag is on, the automation for a lead depends on the schedule type of the bulk step:
 
-1. It skips the lead if the number is invalid or opted out of WhatsApp.
-2. It adds the number (E.164 format) to the `Recipient List` of the rule. It does not add the same number twice.
-3. It finds the open `Broadcast` of the rule (status `Draft` or `Scheduled`) or creates one. The `Broadcast` has one WhatsApp `Broadcast Channel` row with `is_lead_automation_broadcast` set.
-4. It updates the recipient count.
+- **Immediate**: The automation skips the lead if the number is invalid or opted out of WhatsApp. Otherwise it creates a `Broadcast` with `recipient_source` set to `Individual` and one WhatsApp `Broadcast Channel` row (`is_lead_automation_broadcast` set). It launches the `Broadcast` with `msuite_campaigns.broadcast.hub.launch`, which sends the message to that one lead.
+- **Scheduled Time** and **Delay Buffer**: The automation adds the number (E.164 format) to the `Recipient List` of the rule. It does not add the same number twice. It finds the open `Broadcast` of the rule (status `Draft` or `Scheduled`) or creates one, and updates the recipient count. The `Broadcast` is sent later by the central broadcast scheduler.
+- **Target broadcast**: If the rule names a `target_broadcast` that is no longer open, the automation skips the lead and returns `{"status": "skipped", "reason": "target_broadcast_not_open"}`.
 
-The automation does not send messages itself. The central broadcast scheduler and the WhatsApp channel adapter send the `Broadcast` after it is launched. There is no Email or SMS path in this automation.
+There is no Email or SMS path in this automation.
 
 #### Tests
 
