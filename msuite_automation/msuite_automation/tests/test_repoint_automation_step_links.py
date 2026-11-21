@@ -108,13 +108,22 @@ class TestRepointAutomationStepLinks(IntegrationTestCase):
 			},
 		)
 
-		result = execute(dry_run=True)
+		result = execute()
 		self.assertTrue(result["dry_run"])
 		self.assertGreaterEqual(result["repointed"], 1)
 
 		# Verify DB unchanged
 		val = frappe.db.get_value("Automation Step", step_name, "target_bulk_message")
 		self.assertEqual(val, "LEGACY-BWM-DRY")
+
+	def test_dry_run_flag_not_altered_by_in_patch(self):
+		# Verify dry_run strictly respects argument and is not flipped by in_patch flag
+		frappe.flags.in_patch = True
+		try:
+			result = execute(dry_run=True)
+			self.assertTrue(result["dry_run"])
+		finally:
+			frappe.flags.in_patch = False
 
 	def test_repoints_target_bulk_message_to_broadcast(self):
 		bc_name = self._create_broadcast("Test Repoint BC Live", "Bulk WhatsApp Message", "LEGACY-BWM-LIVE")
@@ -176,19 +185,37 @@ class TestRepointAutomationStepLinks(IntegrationTestCase):
 
 	def test_second_run_repoints_zero(self):
 		bc_name = self._create_broadcast("Test Repoint BC Second", "Bulk WhatsApp Message", "LEGACY-BWM-SEC")
-		auto_name, step_name = self._create_automation_step(
-			"Test Repoint Second Run",
-			{
-				"step_id": "step_sec_1",
-				"step_type": "Send WhatsApp",
-				"delivery_mode": "Bulk campaign",
-				"target_bulk_message": "LEGACY-BWM-SEC",
-			},
-		)
+		rl_name = self._create_recipient_list("TEST-REP-RL-SECOND (WhatsApp)")
+		auto = frappe.get_doc({
+			"doctype": "Messaging Automation",
+			"title": "Test Repoint Second Run",
+			"disabled": 1,
+			"steps": [
+				{
+					"step_id": "step_sec_1",
+					"step_type": "Send WhatsApp",
+					"delivery_mode": "Bulk campaign",
+					"target_bulk_message": "LEGACY-BWM-SEC",
+				},
+				{
+					"step_id": "step_sec_2",
+					"step_type": "Add to Recipient List",
+					"recipient_list": "TEST-REP-RL-SECOND",
+				},
+			],
+		})
+		auto.flags.ignore_validate = True
+		auto.flags.ignore_plan_gate = True
+		auto.flags.ignore_links = True
+		auto.insert(ignore_permissions=True, ignore_links=True)
+
+		step_bc_name = auto.steps[0].name
+		step_rl_name = auto.steps[1].name
 
 		res1 = execute(dry_run=False)
-		self.assertGreaterEqual(res1["repointed"], 1)
-		self.assertEqual(frappe.db.get_value("Automation Step", step_name, "target_bulk_message"), bc_name)
+		self.assertGreaterEqual(res1["repointed"], 2)
+		self.assertEqual(frappe.db.get_value("Automation Step", step_bc_name, "target_bulk_message"), bc_name)
+		self.assertEqual(frappe.db.get_value("Automation Step", step_rl_name, "recipient_list"), rl_name)
 
 		res2 = execute(dry_run=False)
 		self.assertEqual(res2["repointed"], 0)

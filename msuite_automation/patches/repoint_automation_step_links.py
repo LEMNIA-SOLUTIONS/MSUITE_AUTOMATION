@@ -30,15 +30,6 @@ def execute(dry_run: bool = True) -> dict:
 				"dry_run": bool,
 			}
 	"""
-	# When invoked by Frappe's patch runner during bench migrate, default to live execution.
-	if getattr(frappe.flags, "in_patch", False):
-		import inspect
-
-		cur_frame = inspect.currentframe()
-		caller_frame = cur_frame.f_back if cur_frame else None
-		if caller_frame and caller_frame.f_code.co_name == "execute_patch":
-			dry_run = False
-
 	summary: dict = {
 		"checked": 0,
 		"repointed": 0,

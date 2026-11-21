@@ -111,6 +111,10 @@ The patch `msuite_automation.patches.repoint_automation_step_links`:
 - Repoints `target_bulk_message` legacy links (e.g. `Bulk WhatsApp Message`) to unified `Broadcast` records via `msuite_campaigns.broadcast.legacy.resolve`.
 - Repoints `recipient_list` legacy links (e.g. `WhatsApp Recipient List`) to unified `Recipient List` records via `msuite_campaigns.broadcast.legacy.resolve`.
 - Unresolved legacy names are safely recorded in `unresolved` without blanking existing fields.
+- **Manual Cutover Execution**: Not auto-registered in `patches.txt` so `bench migrate` will not repoint live data before frontend cutover while the legacy flag-off automation path still needs old names. Run manually in the cutover runbook with dry run as default (`dry_run=True`):
+  ```bash
+  bench --site <site> execute msuite_automation.patches.repoint_automation_step_links.execute --kwargs "{'dry_run': False}"
+  ```
 
 #### Tests
 
