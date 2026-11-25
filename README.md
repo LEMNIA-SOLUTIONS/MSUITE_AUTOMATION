@@ -34,6 +34,94 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 - **Opt-out**: a recipient who opted out (Contact flag, Audience Member, or Channel Handle `opted_out`) is skipped for MARKETING templates only; utility templates and free-form text are still sent.
 - **Opt-in (AUT-119)**: MARKETING templates also need a recorded WhatsApp opt-in, or the step result is `skipped: no consent` (the dry run shows `no consent`). Opt-in means a Channel Handle with `opted_in` = 1 (set when the customer opts in through WhatsApp). Contact `consent_updated_at` does not count: SMS and Email events set it too. An opt-out always wins and keeps `skipped: opted out`. Utility, authentication and free-form sends are not affected. Turn the check off with `require_marketing_opt_in` in WhatsApp Settings (on by default; a site that has not run `bench migrate` yet behaves as on, and migrate and a fresh install write 1). Deploy `msuite_automation` and `msuite_whatsapp` together: Automation calls `has_marketing_consent`, which only the new WhatsApp version has. The check is `has_marketing_consent` in `msuite_whatsapp`, called through the WhatsApp channel app.
 
+### External API (token auth)
+
+An external system (for example Flavorz) manages automations with the endpoints in `msuite_automation.msuite_automation.api.automations`. Send `Authorization: token <api_key>:<api_secret>`. Automations are `Messaging Automation` documents.
+
+These endpoints return the value directly. They do not use the `{ok, data, error}` envelope of the social post API. An error returns a real HTTP status (403 no permission, 404 not found, 417 validation).
+
+**Roles.** `WhatsApp Manager`, `MSuite Admin` and `System Manager` can read, write and delete `Messaging Automation`. `Social Manager` cannot manage automations. A plan limit on active automations and on runs per month can also refuse a call.
+
+| Endpoint | Method | Arguments | Returns |
+|---|---|---|---|
+| `get_automations` | GET | `search`, `trigger_type`, `enabled` (`1` or `0`), `reference_doctype`, `start`, `page_length` | `{"items": [...], "total_count": n}`. Each item: `name`, `title`, `disabled`, `trigger_type`, `reference_doctype`, `trigger_types`, `doctypes`, `when_summary`, `channels`, `last_run`, `modified`. |
+| `get_automation` | GET | `name` | The document with all child tables. |
+| `save_automation` | POST | `doc` (JSON). Include `name` to update. | `{"name": ...}` |
+| `toggle_automation` | POST | `name`, `enabled` (`1` or `0`) | `{"name": ..., "disabled": 0 or 1}` |
+| `duplicate_automation` | POST | `name` | `{"name": <copy>}`. The copy is off and titled "<title> (copy)". |
+| `delete_automation` | POST | `name` | `{"name": ...}` |
+| `bulk_delete_automations` | POST | `names` (list) | `{"deleted": [...], "failed": [{"name", "error"}]}` |
+| `get_runs` | GET | `name`, `limit` (default `RUN_LIST_DEFAULT_LIMIT` = 10, at most `RUN_LIST_MAX_LIMIT` = 50) | Runs, newest first: `name`, `status`, `trigger_id`, `reference_doctype`, `reference_name`, `creation`, `resume_at`, `sent_count`, `log`, `error`, `delivery_failed`. |
+| `retry_run` | POST | `run_name` | `{"name": <new run>}`. Only a `Failed` run, and the automation must be on. |
+| `test_automation` | GET | `doc`, `docname`, `trigger_id` | A dry run on one record. Sends nothing and writes nothing. |
+| `get_stats` | GET | none | `{"total", "active", "dispatched", "by_trigger", "doctypes"}` |
+| `get_reference_doctypes` | GET | none | DocType names the user can read. |
+| `get_doctype_fields` | GET | `doctype` | Field metadata for pickers: `fieldname`, `label`, `fieldtype`, `options`, `reqd`. |
+| `get_ig_step_meta` | GET | none | Instagram step limits and `templates_enabled`. |
+| `get_condition_edit_access` | GET | `name` (optional) | `true` when the user may edit trigger conditions. |
+
+**`doc` for `save_automation`.**
+
+- Fields: `title` (required), `description`, `disabled`, `send_frequency` (`Every time`, `Once per day`, `Once per document`), `filter_logic`, `phone_field`, `email_field`, `whatsapp_account`, `sms_account`, `skip_return_documents`.
+- Child tables: `triggers`, `filters`, `steps`, `edges`, `variable_mappings`, `recipients`, `notes`.
+- Trigger types: `Document Event`, `Field Change`, `Date Based`, `Schedule`.
+- Step types: `Send WhatsApp`, `Send Email`, `Send SMS`, `Wait`, `Wait for Event`, `If/Else`, `Switch`, `Update Field`, `Add to Recipient List`, `Send IG Public Reply`, `Send IG Consent Template`.
+- A user without permission level 1 write access cannot change a trigger `condition`. MSuite keeps the saved condition and ignores the one sent.
+
+**Mention automation.** Use a `Document Event` trigger on `Social Mention` with `doc_event` `After Insert`, and a `Send IG Public Reply` step with `ig_reply_text`. The Instagram steps need every trigger to be a `Social Mention` trigger. Turning the automation on makes MSuite reply publicly to every new mention on accounts with a live token.
+
+```json
+{
+  "title": "Mention reply",
+  "disabled": 1,
+  "triggers": [{"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "Social Mention", "doc_event": "After Insert"}],
+  "steps": [{"step_id": "s1", "step_type": "Send IG Public Reply", "ig_reply_text": "Thanks for the mention!"}],
+  "edges": [{"source_id": "t1", "source_handle": "", "target_id": "s1"}]
+}
+```
+
+The full field reference, with every trigger and step field, is in `docs/flavorz-msuite-api-for-sagar.md` in the workspace root.
+
+### Broadcast Integration
+
+`msuite_automation` integrates with unified Broadcasts and Recipient Lists for workflow step execution.
+
+#### Configuration Flag
+
+- Key: `msuite_broadcast_enabled` in `site_config.json`. The default is off.
+- The flag affects only the WhatsApp lead-status automation in `msuite_automation/engine/channels.py`.
+  - Flag off: the automation uses the legacy `WhatsApp Recipient List` and `Bulk WhatsApp Message` code. Nothing changes.
+  - Flag on: the automation uses `Recipient List`, `Recipient Contact` and `Broadcast`.
+
+#### Flagged Lead-Status Automation Path
+
+When the flag is on, the automation for a lead depends on the schedule type of the bulk step:
+
+- **Immediate**: The automation skips the lead if the number is invalid or opted out of WhatsApp. Otherwise it creates a `Broadcast` with `recipient_source` set to `Individual` and one WhatsApp `Broadcast Channel` row (`is_lead_automation_broadcast` set). It launches the `Broadcast` with `msuite_campaigns.broadcast.hub.launch`, which sends the message to that one lead.
+- **Scheduled Time** and **Delay Buffer**: The automation adds the number (E.164 format) to the `Recipient List` of the rule. It does not add the same number twice. It finds the open `Broadcast` of the rule (status `Draft` or `Scheduled`) or creates one, and updates the recipient count. The `Broadcast` is sent later by the central broadcast scheduler.
+- **Target broadcast**: If the rule names a `target_broadcast` that is no longer open, the automation skips the lead and returns `{"status": "skipped", "reason": "target_broadcast_not_open"}`.
+
+There is no Email or SMS path in this automation.
+
+#### Automation Step Link Repointing
+
+`Automation Step` records link `target_bulk_message` to `Broadcast` and `recipient_list` to `Recipient List`.
+
+The patch `msuite_automation.patches.repoint_automation_step_links`:
+- Repoints `target_bulk_message` legacy links (e.g. `Bulk WhatsApp Message`) to unified `Broadcast` records via `msuite_campaigns.broadcast.legacy.resolve`.
+- Repoints `recipient_list` legacy links (e.g. `WhatsApp Recipient List`) to unified `Recipient List` records via `msuite_campaigns.broadcast.legacy.resolve`.
+- Unresolved legacy names are safely recorded in `unresolved` without blanking existing fields.
+- **Manual Cutover Execution**: Not auto-registered in `patches.txt` so `bench migrate` will not repoint live data before frontend cutover while the legacy flag-off automation path still needs old names. Run manually in the cutover runbook with dry run as default (`dry_run=True`):
+  ```bash
+  bench --site <site> execute msuite_automation.patches.repoint_automation_step_links.execute --kwargs "{'dry_run': False}"
+  ```
+
+#### Tests
+
+```bash
+bench --site lemnia.localhost run-tests --app msuite_automation --module msuite_automation.msuite_automation.tests.test_broadcast_path
+```
+
 ### Installation
 
 You can install this app using the [bench](https://github.com/frappe/bench) CLI:
