@@ -88,3 +88,86 @@ class TestValidateGraph(unittest.TestCase):
 		self.assertEqual(validate_activation([], [], []), ["Add at least one trigger"])
 		errs = validate_activation([T("t1"), T("t2")], [S("a"), S("d", "Wait")], [E("t1", "a"), E("t2", "d")])
 		self.assertEqual(errs, ["Trigger t2 does not lead to any action"])
+
+	def test_date_based_trigger_offset_days(self):
+		"""Validate offset_days on Date Based trigger: 1 to 10 inclusive, ignored on others."""
+		def date_trigger(offset):
+			return {"trigger_id": "t1", "trigger_type": "Date Based", "reference_doctype": "Sales Order",
+				"date_field": "delivery_date", "offset_days": offset}
+
+		valid_cases = [1, 10, "1", "10", 5]
+		for val in valid_cases:
+			errs = validate_graph([date_trigger(val)], [S("a")], [E("t1", "a")])
+			self.assertNotIn("offset days must be a whole number", "\n".join(errs), f"Expected {val} to be valid")
+
+		invalid_cases = [0, -1, 11, 1.5, "abc", None]
+		for val in invalid_cases:
+			errs = validate_graph([date_trigger(val)], [S("a")], [E("t1", "a")])
+			self.assertTrue(any("offset days must be a whole number from 1 to 10" in e for e in errs),
+				f"Expected {val} to be rejected, got: {errs}")
+
+		# Ignored for other trigger types
+		field_trigger = {"trigger_id": "t1", "trigger_type": "Field Change", "reference_doctype": "Sales Order",
+			"field": "status", "offset_days": 0}
+		self.assertEqual(validate_graph([field_trigger], [S("a")], [E("t1", "a")]), [])
+
+	def test_wait_value_validation(self):
+		"""Validate wait_value: must be whole number > 0, no upper cap."""
+		for val in (0, -1):
+			errs = validate_graph([T("t1")], [S("d", "Wait", wait_value=val)], [E("t1", "d")])
+			self.assertTrue(any("wait must be greater than 0" in e for e in errs), f"Expected {val} to fail > 0 check")
+
+		for val in (1.5, "1.5"):
+			errs = validate_graph([T("t1")], [S("d", "Wait", wait_value=val)], [E("t1", "d")])
+			self.assertTrue(any("wait must be a whole number" in e for e in errs), f"Expected {val} to fail whole number check")
+
+		# Huge value is valid (no new upper cap)
+		self.assertEqual(validate_graph([T("t1")], [S("d", "Wait", wait_value=1000000)], [E("t1", "d")]), [])
+
+	def test_empty_if_else_rule_list_draft_vs_activation(self):
+		"""Empty If/Else rules: warning on draft, blocking on activation."""
+		from msuite_automation.msuite_automation.engine.graph import validate_warnings
+		triggers = [T("t1")]
+		steps = [S("i", "If/Else", condition_rules="[]"), S("a")]
+		edges = [E("t1", "i"), E("i", "a", "yes")]
+
+		# Draft allows saving (validate_graph has no errors)
+		self.assertEqual(validate_graph(triggers, steps, edges), [])
+		# Draft produces warning
+		warnings = validate_warnings(triggers, steps, edges)
+		self.assertTrue(any("i: add at least one rule" in w for w in warnings), f"Expected warning, got: {warnings}")
+
+		# Activation is blocked
+		act_errs = validate_activation(triggers, steps, edges)
+		self.assertTrue(any("i: add at least one rule" in e for e in act_errs), f"Expected activation error, got: {act_errs}")
+
+	def test_orphan_wait_draft_vs_activation(self):
+		"""Orphan node: warning on draft, blocking on activation."""
+		from msuite_automation.msuite_automation.engine.graph import validate_warnings
+		triggers = [T("t1")]
+		steps = [S("a"), S("d", "Wait", wait_value=1)]
+		edges = [E("t1", "a")]  # d has no incoming wire
+
+		# Draft allows saving
+		self.assertEqual(validate_graph(triggers, steps, edges), [])
+		warnings = validate_warnings(triggers, steps, edges)
+		self.assertTrue(any("Step d is not connected to the flow" in w for w in warnings), f"Expected orphan warning, got: {warnings}")
+
+		# Activation is blocked
+		act_errs = validate_activation(triggers, steps, edges)
+		self.assertTrue(any("Step d is not connected to the flow" in e for e in act_errs), f"Expected orphan activation error, got: {act_errs}")
+
+	def test_orphan_with_chain_of_nodes(self):
+		"""Orphan chain: all unreachable nodes warned on draft, blocked on activation."""
+		from msuite_automation.msuite_automation.engine.graph import validate_warnings
+		triggers = [T("t1")]
+		steps = [S("a"), S("d1", "Wait", wait_value=1), S("d2", "Wait", wait_value=2)]
+		edges = [E("t1", "a"), E("d1", "d2")]  # d1->d2 chain not reachable from t1
+
+		warnings = validate_warnings(triggers, steps, edges)
+		self.assertTrue(any("Step d1 is not connected to the flow" in w for w in warnings))
+		self.assertTrue(any("Step d2 is not connected to the flow" in w for w in warnings))
+
+		act_errs = validate_activation(triggers, steps, edges)
+		self.assertTrue(any("Step d1 is not connected to the flow" in e for e in act_errs))
+		self.assertTrue(any("Step d2 is not connected to the flow" in e for e in act_errs))

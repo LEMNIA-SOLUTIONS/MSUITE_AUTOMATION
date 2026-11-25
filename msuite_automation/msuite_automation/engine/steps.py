@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 
@@ -30,16 +31,27 @@ from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_inbox.inbox.services.mentions import graph
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST,
+	AUTOMATION_WRITE_FLAG,
+	OWNER_NO_WRITE_MESSAGE,
+	OWNER_UNUSABLE_MESSAGE,
+	SYSTEM_USER,
 	CONTEXT_MENTION_REPLY,
+	MARKETING_CATEGORY,
 	ONCE_PER_DAY,
 	ONCE_PER_DOCUMENT,
 	REASON_SEND_FAILED,
+	REQUIRE_OPT_IN_FIELD,
+	WHATSAPP_SETTINGS_DOCTYPE,
 	RESULT_SENT,
+	RESULT_SKIPPED_ALREADY_SENT,
 	RESULT_SKIPPED_DUPLICATE,
 	RESULT_SKIPPED_IG_LOGIN,
 	RESULT_SKIPPED_MENTION_UNRESOLVED,
 	RESULT_SKIPPED_NO_AUTHOR,
+	RESULT_SKIPPED_NO_CONSENT,
 	RESULT_SKIPPED_NO_CONSENT_RECORD,
+	RESULT_SKIPPED_NO_RECIPIENT,
+	RESULT_SKIPPED_OPTED_OUT,
 	RESULT_SKIPPED_PREFIX,
 	RESULT_SKIPPED_REPLY_REFUSED,
 	RESULT_SKIPPED_TEMPLATES_DISABLED,
@@ -50,7 +62,14 @@ from msuite_automation.msuite_automation.constants import (
 	SEND_IG_PUBLIC_REPLY,
 	SEND_SMS,
 	SEND_WHATSAPP,
+	SKIP_REASON_ALREADY_IN_LIST,
+	StepOutcome,
 	UPDATE_FIELD,
+	step_added,
+	step_error,
+	step_sent,
+	step_skipped,
+	step_updated,
 )
 from msuite_automation.msuite_automation.engine import channels
 from msuite_automation.msuite_automation.engine.filters import rules_pass
@@ -72,12 +91,30 @@ def _dedupe_key(ctx, step, channel):
 
 
 def _send(ctx, step, channel, fn):
+	"""Execute an outbound message send, handling deduplication locks and logging.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, value, entry, etc.
+		step: Step definition dict or object.
+		channel: Channel short code ('wa', 'email', 'sms') for deduplication locking.
+		fn: Callable executing the channel send and returning status or message identifier.
+
+	Returns:
+		str: 'sent' on success, or a skip reason ('skipped: duplicate', 'skipped: opted out', 'skipped: no recipient').
+
+	Raises:
+		channels.SendRetry: When a transient failure or lock issue occurs.
+		Exception: On unexpected failures during send.
+
+	Side Effects:
+		Acquires/releases redis deduplication locks; mutates ctx.entry with Channel Message name when available.
+	"""
 	a = ctx.automation
 	lock = _dedupe_key(ctx, step, channel) if a.send_frequency not in (ONCE_PER_DAY, ONCE_PER_DOCUMENT) and ctx.value else None
 	if lock:
 		try:
 			if not channels.acquire_lock(lock):
-				return "skipped: duplicate"
+				return RESULT_SKIPPED_DUPLICATE
 		except channels.LockUnavailable as e:
 			raise channels.SendRetry("transient", f"duplicate-send guard unavailable: {e}") from e
 	try:
@@ -85,14 +122,26 @@ def _send(ctx, step, channel, fn):
 	except channels.RecipientOptedOut:
 		if lock:
 			channels.release_lock(lock)
-		return "skipped: opted out"
+		return RESULT_SKIPPED_OPTED_OUT
+	except channels.RecipientNoConsent:
+		if lock:
+			channels.release_lock(lock)
+		return RESULT_SKIPPED_NO_CONSENT
 	except Exception:
 		if lock:
 			channels.release_lock(lock)
 		raise
 	if not ok and lock:
 		channels.release_lock(lock)
-	return "sent" if ok else "skipped: no recipient"
+	if ok:
+		msg_name = None
+		if isinstance(ok, str) and ok != "sent":
+			msg_name = ok
+		elif isinstance(ok, dict):
+			msg_name = ok.get("message")
+		if msg_name and getattr(ctx, "entry", None) is not None and isinstance(ctx.entry, dict):
+			ctx.entry["message"] = msg_name
+	return RESULT_SENT if ok else RESULT_SKIPPED_NO_RECIPIENT
 
 
 def update_value(doc, step):
@@ -107,6 +156,56 @@ def update_value(doc, step):
 	return value
 
 
+@contextlib.contextmanager
+def _run_as_owner(owner):
+	"""Run the block as the automation owner when the session is Administrator (scheduler / date-based runs),
+	because some rules (the Lead pipeline) skip Administrator. No switch when the owner is Administrator
+	(intentional bypass) or the session is already a normal user. The save then also needs the owner's write
+	permission on the record.
+
+	Args:
+		owner: the Messaging Automation's owner (user id); empty counts as unusable.
+
+	Raises:
+		frappe.ValidationError: owner is empty, missing or disabled (never falls back to Administrator).
+		frappe.PermissionError: owner may not update the record (bare errors get a message naming the owner;
+			errors that already carry a reason keep it).
+
+	Side Effects:
+		frappe.set_user; the previous user is restored in finally, also when the block raises.
+	"""
+	if owner == SYSTEM_USER or frappe.session.user != SYSTEM_USER:
+		yield
+		return
+	if not owner or not frappe.db.get_value("User", owner, "enabled"):
+		frappe.throw(OWNER_UNUSABLE_MESSAGE.format(owner))
+	previous = frappe.session.user
+	try:
+		# frappe.set_user also resets cache/form_dict/role perms; harmless in the background jobs that hit this branch.
+		frappe.set_user(owner)
+		yield
+	except frappe.PermissionError as e:
+		# Frappe's own bare write PermissionError has no text: name the owner. Errors with a reason keep it.
+		if str(e).strip():
+			raise
+		raise frappe.PermissionError(OWNER_NO_WRITE_MESSAGE.format(owner)) from e
+	finally:
+		frappe.set_user(previous)
+
+
+def _save_field(doc, field, value, owner=None) -> None:
+	"""Save one field with doc.save(), so every rule of the record applies as for a manual edit: mandatory
+	fields, permissions and other apps' validations (e.g. the Lead pipeline). Raises when a rule rejects the
+	value; the step then fails with that message and the record keeps its old value. The flag stops this
+	save from starting other automations. `owner`: see _run_as_owner (the save runs as that user when the
+	session is Administrator)."""
+	with _run_as_owner(owner):
+		record = frappe.get_doc(doc.doctype, doc.name)
+		record.set(field, value)
+		record.flags[AUTOMATION_WRITE_FLAG] = True
+		record.save()
+
+
 def set_in_memory(doc, field, value):
 	if callable(getattr(doc, "set", None)):
 		doc.set(field, value)
@@ -114,30 +213,134 @@ def set_in_memory(doc, field, value):
 		doc[field] = value
 
 
-def _is_marketing_opted_out(ctx, step) -> bool:
+def _marketing_recipient_phone(ctx, step):
+	"""Resolve the recipient phone when the step sends a MARKETING WhatsApp template.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, and optional phone.
+		step: Step definition containing step attributes or dict.
+
+	Returns:
+		str | None: The recipient phone, or None when the step is not a MARKETING
+			template send or has no recipient.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
 	tpl_name = getattr(step, "template", None) or (step.get("template") if isinstance(step, dict) else None)
 	if not tpl_name:
-		return False
+		return None
 	category = frappe.db.get_value("WhatsApp Templates", tpl_name, "category")
 	if not category and hasattr(step, "category"):
 		category = step.category
 	elif not category and isinstance(step, dict):
 		category = step.get("category")
-	if (category or "").strip().upper() != "MARKETING":
-		return False
-
+	if (category or "").strip().upper() != MARKETING_CATEGORY:
+		return None
 	a, doc = ctx.automation, ctx.doc
-	phone = (ctx.get("phone") if hasattr(ctx, "get") else None) or channels.resolve_phone(a, doc)
+	return (ctx.get("phone") if hasattr(ctx, "get") else None) or channels.resolve_phone(a, doc) or None
+
+
+def _lacks_marketing_consent(ctx, step) -> bool:
+	"""Check if a MARKETING template send lacks a recorded WhatsApp opt-in.
+
+	Only applies when the WhatsApp Settings option `require_marketing_opt_in` is on
+	(a site that has not migrated yet counts as on; migrate writes 1). Callers check opt-out first, so
+	an opted-out recipient keeps the "opted out" result.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, and optional phone.
+		step: Step definition containing step attributes or dict.
+
+	Returns:
+		bool: True if marketing template, setting on, and no consent is recorded.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	phone = _marketing_recipient_phone(ctx, step)
+	if not phone:
+		return False
+	# Field missing from the meta means "not migrated yet": default on. The migrate patch and
+	# the after_install hook write 1, so a stored 0 is an explicit admin choice.
+	if frappe.get_meta(WHATSAPP_SETTINGS_DOCTYPE).has_field(REQUIRE_OPT_IN_FIELD) and not frappe.db.get_single_value(WHATSAPP_SETTINGS_DOCTYPE, REQUIRE_OPT_IN_FIELD):
+		return False
+	phone_e164 = phone_validator.normalize(phone).get("e164") or phone
+	return not channels.whatsapp_has_consent(phone_e164)
+
+
+def _is_marketing_opted_out(ctx, step) -> bool:
+	"""Check if the recipient is opted out of WhatsApp marketing communications.
+
+	Opted out means ANY of:
+	1. Contact unsubscribed_whatsapp or unsubscribed flags.
+	2. Audience Member unsubscribed_whatsapp (checked via channels.whatsapp_opted_out).
+	3. Channel Handle metadata opted_out flag.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, and optional phone.
+		step: Step definition containing step attributes or dict.
+
+	Returns:
+		bool: True if marketing template and recipient is opted out via Contact,
+			Audience Member, or Channel Handle metadata; False otherwise.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	phone = _marketing_recipient_phone(ctx, step)
 	if not phone:
 		return False
 
 	parsed = phone_validator.normalize(phone)
 	phone_e164 = parsed.get("e164") or phone
-	# STOP from a number outside every Audience only flags the Contact, so check both stores.
-	return channels.whatsapp_opted_out(phone_e164) or any(
-		frappe.db.exists("Contact", {col: val, "unsubscribed_whatsapp": 1})
-		for col, val in (("phone_e164", phone_e164), ("mobile_no", phone))
-	)
+
+	# 1. Contact flags: unsubscribed_whatsapp or unsubscribed
+	for col, val in (("phone_e164", phone_e164), ("mobile_no", phone)):
+		if not val:
+			continue
+		if frappe.db.exists("Contact", {col: val, "unsubscribed_whatsapp": 1}) or frappe.db.exists("Contact", {col: val, "unsubscribed": 1}):
+			return True
+
+	# 2. Audience Member unsubscription & WhatsApp app opt-out
+	if channels.whatsapp_opted_out(phone_e164):
+		return True
+
+	# 3. Channel Handle metadata opted_out flag
+	clean = str(phone_e164 or phone).strip()
+	digits = "".join(c for c in clean if c.isdigit())
+	candidates = list({clean, digits, f"+{digits}"} - {"", "+"})
+	handles = frappe.db.get_all(
+		"Channel Handle",
+		filters={"channel_type": "WhatsApp", "platform_handle": ["in", candidates]},
+		fields=["name", "metadata"],
+	) or []
+	if not handles:
+		handles = frappe.db.get_all(
+			"Channel Handle",
+			filters={"channel_type": "WhatsApp", "bsuid": ["in", candidates]},
+			fields=["name", "metadata"],
+		) or []
+	for h in handles:
+		meta = h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)
+		if isinstance(meta, str):
+			try:
+				meta = json.loads(meta)
+			except Exception:
+				meta = {}
+		if isinstance(meta, dict) and meta.get("opted_out"):
+			return True
+
+	return False
 
 
 def _require_mention(doc, step_type: str) -> None:
@@ -315,30 +518,46 @@ def send_ig_consent_template(ctx, step) -> str:
 		channels.release_lock(lock_key)
 		reason = f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
 		ig_consent.mark_failed(consent_names, reason)
-		return f"{RESULT_SKIPPED_PREFIX}{reason}"
+		return step_skipped(reason)
 
 	if res.get("ok"):
 		return RESULT_SENT
 	# Nothing was sent: free the lock so a retry is not swallowed as a duplicate.
 	channels.release_lock(lock_key)
 	reason = res.get("reason") or REASON_SEND_FAILED
-	return f"{RESULT_SKIPPED_PREFIX}{reason}"
+	return step_skipped(reason)
 
 
-def execute(ctx, step) -> str:
-	"""Run one non-control step; returns a short result string. Raises on error."""
+def execute(ctx, step) -> StepOutcome:
+	"""Run one non-control step; returns a structured StepOutcome.
+
+	Args:
+		ctx: Automation execution context containing automation, doc, value, etc.
+		step: Automation step document or dictionary.
+
+	Returns:
+		StepOutcome: Structured outcome (outcome_status/status and reason, inherits from str for display string).
+
+	Raises:
+		Exception: On execution errors during send, update, or external dispatch.
+
+	Side Effects:
+		Dispatches messages across channels, updates document fields in DB/memory, or adds recipients to lists.
+	"""
 	a, doc = ctx.automation, ctx.doc
 	if step.step_type == SEND_WHATSAPP:
 		if channels.already_sent(step.template, doc.doctype, doc.name, a.send_frequency, ignore_failed=bool(ctx.get("retrying"))):
-			return "skipped: already sent"
+			return RESULT_SKIPPED_ALREADY_SENT
 		if _is_marketing_opted_out(ctx, step):
-			return "skipped: opted out"
+			return RESULT_SKIPPED_OPTED_OUT
+		if _lacks_marketing_consent(ctx, step):
+			return RESULT_SKIPPED_NO_CONSENT
 		if step.delivery_mode == "Bulk campaign":
 			phone = channels.resolve_phone(a, doc)
 			if not phone:
-				return "skipped: no recipient"
+				return RESULT_SKIPPED_NO_RECIPIENT
 			res = channels.dispatch_bulk(a, step, doc, phone, channels.bulk_body_params(a, step, doc))
-			return "sent" if res.get("status") == "success" else f"error: {res.get('reason')}"
+			return step_sent() if res.get("status") == "success" else step_error(res.get("reason"))
 		return _send(ctx, step, "wa", lambda: channels.send_whatsapp(a, step, doc, phone=ctx.get("phone")))
 	if step.step_type == SEND_EMAIL:
 		return _send(ctx, step, "email", lambda: channels.send_email(a, step, doc))
@@ -346,16 +565,16 @@ def execute(ctx, step) -> str:
 		return _send(ctx, step, "sms", lambda: channels.send_sms(a, step, doc))
 	if step.step_type == UPDATE_FIELD:
 		value = update_value(doc, step)
-		frappe.db.set_value(doc.doctype, doc.name, step.update_field, value)
+		_save_field(doc, step.update_field, value, getattr(a, "owner", None))
 		set_in_memory(doc, step.update_field, value)
-		return "updated"
+		return step_updated()
 	if step.step_type == ADD_TO_LIST:
 		phone = channels.resolve_phone(a, doc)
 		if not phone:
-			return "skipped: no recipient"
-		return "added" if channels.add_to_list(step.recipient_list, phone, doc) else "skipped: already in list"
+			return RESULT_SKIPPED_NO_RECIPIENT
+		return step_added() if channels.add_to_list(step.recipient_list, phone, doc) else step_skipped(SKIP_REASON_ALREADY_IN_LIST)
 	if step.step_type == SEND_IG_PUBLIC_REPLY:
 		return send_ig_public_reply(ctx, step)
 	if step.step_type == SEND_IG_CONSENT_TEMPLATE:
 		return send_ig_consent_template(ctx, step)
-	return f"skipped: unknown step type {step.step_type}"
+	return step_skipped(f"unknown step type {step.step_type}")

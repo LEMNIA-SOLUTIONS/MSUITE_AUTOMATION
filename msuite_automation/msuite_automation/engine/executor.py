@@ -14,8 +14,12 @@ from frappe.utils.safe_exec import get_safe_globals, safe_exec
 from msuite_core.constants import LOGGER_NAME
 from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST, DOCTYPE, IF_ELSE, ONCE_PER_DAY, ONCE_PER_DOCUMENT, OUTBOX_DOCTYPE, PATH_RUNNING, PATH_WAITING, QUEUE_SHORT,
-	RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX, SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
-	STUCK_SWEEP_BATCH, SWITCH, WAIT, WAIT_EVENT, WAIT_SIGNAL,
+	RECIPIENT_SKIP_REASONS, RESULT_SKIPPED_PREFIX, RESULT_SKIPPED_RECIPIENT_REASONS, RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX,
+	RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, RUN_STATUS_WAITING,
+	SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
+	STEP_OUTCOME_KEY, STEP_STATUS_ADDED, STEP_STATUS_ERROR, STEP_STATUS_SKIPPED, STEP_STATUS_UPDATED,
+	STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
+	outcome_of,
 )
 from msuite_automation.msuite_automation.engine import channels
 from msuite_automation.msuite_automation.engine import steps as S
@@ -56,14 +60,15 @@ def enqueue_safely(method, **kwargs) -> None:
 	frappe.db.after_commit.add(enqueue_call)
 
 
-def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None):
+def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
 	"""Record a trigger event in the outbox (same transaction as the caller's save, so it commits or rolls
 	back with it) and queue its delivery after commit. If the queued job is lost, redeliver_outbox re-queues it."""
 	payload = dict(name=name, trigger_id=trigger_id, doctype=doctype, docname=docname, value=value,
-		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone)
+		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone, retry=retry)
 	row = frappe.get_doc({"doctype": OUTBOX_DOCTYPE, "payload": json.dumps(payload, default=str)}).insert(ignore_permissions=True)
 	enqueue_safely(DELIVER_OUTBOX_PATH, queue=QUEUE_SHORT,
 		job_id=f"{OUTBOX_JOB_PREFIX}:{row.name}", deduplicate=True, outbox=row.name)
+	return row.name
 
 
 def deliver_outbox(outbox) -> None:
@@ -207,7 +212,7 @@ def effective_automation(automation, step, doctype):
 	phone = (field if phone_node else None) or (rec.phone_field if rec else None) or automation.get("phone_field") or ""
 	email = (field if step.step_type == SEND_EMAIL else None) or (rec.email_field if rec else None) or automation.get("email_field") or ""
 	return frappe._dict(
-		name=automation.name, send_frequency=automation.send_frequency, skip_return_documents=automation.skip_return_documents,
+		name=automation.name, owner=automation.get("owner"), send_frequency=automation.send_frequency, skip_return_documents=automation.skip_return_documents,
 		phone_field=phone, email_field=email,
 		whatsapp_account=step.get("whatsapp_account") or automation.whatsapp_account,
 		whatsapp_phone=step.get("whatsapp_phone") or "",
@@ -253,9 +258,15 @@ def _node_executor(automation, graph, ctx, log):
 			ctx,
 			automation=effective_automation(automation, step, ctx.doc.doctype),
 			retrying=cint(path.get("retry_count")) > 0,
+			entry=entry,
 		)
 		try:
-			entry["result"] = S.execute(node_ctx, step)
+			outcome = S.execute(node_ctx, step)
+			entry["result"] = str(outcome)
+			if hasattr(outcome, STEP_OUTCOME_KEY) and getattr(outcome, STEP_OUTCOME_KEY):
+				entry[STEP_OUTCOME_KEY] = getattr(outcome, STEP_OUTCOME_KEY)
+			if hasattr(outcome, "reason") and outcome.reason is not None:
+				entry["reason"] = outcome.reason
 			path["retry_count"] = 0
 		except Exception as e:
 			delays = RETRY_DELAYS.get(e.kind, ()) if isinstance(e, channels.SendRetry) else ()
@@ -267,26 +278,102 @@ def _node_executor(automation, graph, ctx, log):
 				return WAIT_SIGNAL
 			path["retry_count"] = 0
 			entry["result"], entry["error"] = "error", str(e)[:RUN_ERROR_MAX]
+			entry[STEP_OUTCOME_KEY] = STEP_STATUS_ERROR
+			if getattr(e, "channel_message", None):
+				entry["message"] = e.channel_message
 			frappe.log_error(title=f"Messaging Automation {automation.name} step {node_id} failed")
 		return ""
 	return execute
 
 
+def is_recipient_skip(entry: dict) -> bool:
+	"""Check if a send step log entry represents a recipient-reason skip.
+
+	Supports both structured outcome_status/reason log shapes and legacy
+	result shapes. Only recipient reasons (no recipient, opted out,
+	no consent, no consent record) count as Skipped. A Channel Message's
+	delivery status (e.g. 'delivered') in entry['status'] does not affect outcome logic.
+	"""
+	if not isinstance(entry, dict):
+		return False
+	status, reason = outcome_of(entry)
+	if status == STEP_STATUS_SKIPPED and reason is not None:
+		return reason in RECIPIENT_SKIP_REASONS
+	# Fallback for stored run logs written before this change
+	return entry.get("result") in RESULT_SKIPPED_RECIPIENT_REASONS
+
+
+def has_other_successful_work(log: list) -> bool:
+	"""Check if an action step other than a send succeeded in the run.
+
+	A run that successfully updated a field or added a recipient to a list performed
+	meaningful state modifications and must stay Completed, even if all send steps
+	were recipient-skipped.
+	"""
+	for entry in log:
+		if not isinstance(entry, dict):
+			continue
+		st = entry.get("step_type")
+		status, _ = outcome_of(entry)
+		if st == UPDATE_FIELD and status == STEP_STATUS_UPDATED:
+			return True
+		if st == ADD_TO_LIST and status == STEP_STATUS_ADDED:
+			return True
+	return False
+
+
 def _persist(run, paths, log) -> None:
+	"""Persist run state, active paths, and execution log to the database.
+
+	Calculates the overall run status:
+	- 'Waiting': if any path is currently parked at a Wait or Wait for Event step.
+	- 'Failed': if any Update Field or send step resulted in an error.
+	- 'Skipped': if all send steps were skipped due to recipient reasons
+	  (e.g. no recipient, opted out, no consent, no consent record) and no other
+	  action step (Update Field, Add to List) succeeded.
+	- 'Completed': if execution completed successfully without terminal failures
+	  (including runs where other action steps succeeded or idempotency skips occurred).
+
+	Args:
+		run: Messaging Automation Run document to update and save.
+		paths: List of active/ended execution path dictionaries.
+		log: Execution log entries recorded during the run.
+
+	Returns:
+		None.
+
+	Raises:
+		None. Errors during save are handled by the caller or bubbled.
+
+	Side Effects:
+		Mutates and saves the Messaging Automation Run document (bypassing permissions).
+	"""
 	last_sends = {}
 	for entry in log:
 		if str(entry.get("step_type", "")).startswith("Send"):
 			node_key = (entry.get("path_id"), entry.get("node_id") or entry.get("step_id"))
 			last_sends[node_key] = entry
-	failed = bool(last_sends) and all(entry.get("result") == "error" for entry in last_sends.values())
+	# A rejected Update Field value or any send that errored fails the run (retry skips sends already made).
+	update_failed = any(entry.get("step_type") == UPDATE_FIELD and entry.get("result") == "error" for entry in log)
+	failed = update_failed or any(entry.get("result") == "error" for entry in last_sends.values())
 	waiting = any(p["status"] == PATH_WAITING for p in paths)
+	all_skipped = bool(last_sends) and all(
+		is_recipient_skip(entry) for entry in last_sends.values()
+	) and not has_other_successful_work(log)
 	run.set("paths", [{"path_id": p["path_id"], "node_id": p["node_id"], "status": p["status"],
 		"executed": 1 if p.get("executed") else 0, "joined": 1 if p.get("joined") else 0,
 		"wait_for_event": 1 if p.get("wait_for_event") else 0,
 		"wait_key": p.get("wait_key") or "",
 		"retry_count": cint(p.get("retry_count", 0)),
 		"resume_at": p.get("resume_at") if p["status"] == PATH_WAITING else None} for p in paths])
-	run.status = "Waiting" if waiting else ("Failed" if failed else "Completed")
+	if waiting:
+		run.status = RUN_STATUS_WAITING
+	elif failed:
+		run.status = RUN_STATUS_FAILED
+	elif all_skipped:
+		run.status = RUN_STATUS_SKIPPED
+	else:
+		run.status = RUN_STATUS_COMPLETED
 	run.log = json.dumps(log, default=str)
 	run.sent_count = _sent(log)
 	run.resume_step_id = None
@@ -304,11 +391,13 @@ def _walk(automation, run, doc, ctx_data, paths):
 	counter = itertools.count(len(paths) + 1)
 	paths = advance(graph, paths, _node_executor(automation, graph, ctx, log), lambda: f"p{next(counter)}")
 	log.extend({"path_id": p["path_id"], "node_id": p["node_id"], "step_id": p["node_id"], "result": "error", "error": p.pop("error"),
+		STEP_OUTCOME_KEY: STEP_STATUS_ERROR,
 		"at": str(now_datetime())} for p in paths if p.get("error"))
 	_persist(run, paths, log)
 
 
-def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None):
+def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
+	"""Run one automation for one record. `retry=True` marks a user-requested retry of a failed run, which does not count toward the monthly run limit."""
 	run, claim_key, run_saved = None, None, False
 	try:
 		automation = frappe.get_doc(DOCTYPE, name)
@@ -343,6 +432,7 @@ def run_automation(name, trigger_id, doctype, docname, value="", discriminator="
 		run = frappe.get_doc({"doctype": RUN_DOCTYPE, "automation": name, "trigger_id": trigger.trigger_id, "status": "Running",
 			"reference_doctype": doctype, "reference_name": ref_name, "context": json.dumps(ctx_data, default=str),
 			"log": json.dumps([{"path_id": "p1", "node_id": trigger.trigger_id, "step_id": trigger.trigger_id, "step_type": "Trigger", "result": "started", "at": str(now_datetime())}])})
+		run.flags.is_retry = bool(retry)
 		run.insert(ignore_permissions=True, ignore_links=True)
 		run_saved = True
 		_walk(automation, run, doc, ctx_data, start_paths(trigger.trigger_id))
@@ -608,7 +698,7 @@ def run_scheduled(name, trigger_id=None) -> None:
 				for s in wa:
 					try:
 						channels.send_whatsapp(effective_automation(automation, s, trigger.reference_doctype), s, frappe._dict(doctype=None, name=None), phone=channels.format_number(phone))
-					except channels.RecipientOptedOut:
+					except (channels.RecipientOptedOut, channels.RecipientNoConsent):
 						continue
 					except Exception:
 						frappe.log_error(title=f"Messaging Automation {name}: scheduled send to {phone} failed")

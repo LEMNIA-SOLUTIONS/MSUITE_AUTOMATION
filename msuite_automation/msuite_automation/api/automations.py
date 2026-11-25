@@ -19,10 +19,14 @@ from msuite_automation.msuite_automation.constants import (
 )
 from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_automation.msuite_automation.constants import (
-	DATE_BASED, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, RUN_DOCTYPE, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, SCHEDULE,
-	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
+	DATE_BASED, DEAL_DOCTYPE, DEAL_PRIMARY_CONTACT_MOBILE, DELIVERY_FAILED_DEFAULT_ERROR, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, MESSAGE_STATUS_FAILED,
+	RESULT_SKIPPED_PREFIX, RUN_DOCTYPE, RUN_ERROR_MAX,
+	RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, SCHEDULE,
+	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
+	STEP_OUTCOME_KEY, STEP_STATUS_SKIPPED, outcome_of, step_skipped,
 )
 from msuite_automation.msuite_automation.engine import preview
+from msuite_automation.msuite_automation.engine.filters import VIRTUAL_FIELD_RESOLVERS
 from msuite_core.services.permissions.checks import check_delete, check_read, check_write
 
 CHILD_TABLES = ("triggers", "filters", "steps", "variable_mappings", "edges", "recipients", "notes")
@@ -98,10 +102,18 @@ def get_automations(search: str = "", trigger_type: str = "", enabled: str = "",
 			"step_type": ("in", list(CHANNEL_LABEL))}, fields=["parent", "step_type"]):
 		chans.setdefault(s.parent, set()).add(CHANNEL_LABEL[s.step_type])
 	last = {}
-	for r in frappe.db.sql(f"""select automation, status, creation from `tab{RUN_DOCTYPE}` r
+	for r in frappe.db.sql(f"""select automation, status, creation, log from `tab{RUN_DOCTYPE}` r
 			where creation = (select max(creation) from `tab{RUN_DOCTYPE}` where automation = r.automation)
 			and automation in %(names)s""", {"names": names}, as_dict=True):
-		last[r.automation] = {"status": r.status, "at": str(r.creation)}
+		entry = {"status": r.status, "at": str(r.creation)}
+		if r.status in (RUN_STATUS_FAILED, RUN_STATUS_SKIPPED):
+			try:
+				parsed_log = json.loads(r.log or "[]")
+			except Exception:
+				parsed_log = []
+			key = "error" if r.status == RUN_STATUS_FAILED else "result"
+			entry["error"] = _last_run_reason(parsed_log, key)
+		last[r.automation] = entry
 	items = []
 	for r in rows:
 		triggers = trig.get(r.name, [])
@@ -170,6 +182,8 @@ def toggle_automation(name: str, enabled) -> dict:
 	check_write(DOCTYPE)
 	doc = frappe.get_doc(DOCTYPE, name)
 	doc.disabled = 0 if frappe.utils.cint(enabled) else 1
+	if doc.disabled:  # pausing must work even if the template gained variables in Meta
+		doc.flags[SKIP_MAPPING_CHECK_FLAG] = True
 	doc.save()
 	return {"name": name, "disabled": doc.disabled}
 
@@ -181,6 +195,7 @@ def duplicate_automation(name: str) -> dict:
 	copy = frappe.copy_doc(src)
 	copy.title = f"{src.title} (copy)"
 	copy.disabled = 1
+	copy.flags[SKIP_MAPPING_CHECK_FLAG] = True
 	copy.flags.ignore_permlevel_for_fields = ["condition"]
 	for t in copy.triggers:
 		t.flags.ignore_permlevel_for_fields = ["condition"]
@@ -215,23 +230,64 @@ def bulk_delete_automations(names) -> dict:
 
 
 def _fields(doctype: str, prefix: str = "", label_prefix: str = "") -> list[dict]:
-	out = [{"fieldname": f"{prefix}name", "label": f"{label_prefix}ID", "fieldtype": "Data", "options": None}]
+	"""Retrieve fields of a DocType formatted for automation field pickers.
+
+	Args:
+		doctype: Name of the DocType to read fields from.
+		prefix: Fieldname prefix to prepend (e.g. "sales_order.").
+		label_prefix: Human-readable prefix for labels (e.g. "Sales Order › ").
+
+	Returns:
+		list[dict]: Field dictionaries with fieldname, label, fieldtype, options, and reqd.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	out = [{"fieldname": f"{prefix}name", "label": f"{label_prefix}ID", "fieldtype": "Data", "options": None, "reqd": 1}]
 	for df in frappe.get_meta(doctype).fields:
 		if df.fieldtype in NO_VALUE_TYPES or df.hidden:
 			continue
 		out.append({"fieldname": prefix + df.fieldname, "label": label_prefix + _(df.label or df.fieldname),
-			"fieldtype": df.fieldtype, "options": df.options})
+			"fieldtype": df.fieldtype, "options": df.options, "reqd": int(bool(df.reqd))})
 	return out
 
 
 @frappe.whitelist()
 def get_doctype_fields(doctype: str) -> list[dict]:
+	"""Return selectable field metadata for a given DocType.
+
+	Reads standard and custom fields from meta, and appends virtual fields
+	registered in VIRTUAL_FIELD_RESOLVERS for the given DocType.
+
+	Args:
+		doctype: Name of the DocType to inspect.
+
+	Returns:
+		list[dict]: List of field dictionaries with fieldname, label, fieldtype, options, reqd.
+			Includes sales_order.* fields for Delivery Note, and primary_contact_mobile for CRM Deal.
+
+	Raises:
+		frappe.PermissionError: If caller lacks read permission on DOCTYPE or target doctype.
+
+	Side Effects:
+		None.
+	"""
 	check_read(DOCTYPE)
 	if not frappe.has_permission(doctype, "read"):
 		raise frappe.PermissionError
 	out = _fields(doctype)
-	if doctype == "Delivery Note":
-		out += _fields("Sales Order", "sales_order.", "Sales Order › ")
+	for (dt, field), entry in VIRTUAL_FIELD_RESOLVERS.items():
+		if dt == doctype:
+			if entry.get("target_doctype") and entry.get("prefix"):
+				out += _fields(entry["target_doctype"], entry["prefix"], entry.get("label_prefix", ""))
+			elif entry.get("field_meta"):
+				fm = dict(entry["field_meta"])
+				if "label" in fm:
+					fm["label"] = _(fm["label"])
+				out.append(fm)
 	return out
 
 
@@ -321,12 +377,117 @@ def test_automation(doc, docname: str, trigger_id: str = "") -> dict:
 	return preview.dry_run(automation, target, trig.trigger_id)
 
 
+def _failure_text(entry) -> str:
+	"""Extract error or failure reason from a log entry or message record.
+
+	Checks failure_reason, then status_error, then error.
+
+	Args:
+		entry: Dictionary containing error / failure fields, or None.
+
+	Returns:
+		str: Extracted failure string, or empty string if none found.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	if not isinstance(entry, dict):
+		return ""
+	return str(entry.get("failure_reason") or entry.get("status_error") or entry.get("error") or "")
+
+
+def _last_run_reason(log_entries: list, key: str = "error") -> str:
+	"""Extract the most recent error or skip reason from a run log."""
+	for entry in reversed(log_entries or []):
+		if isinstance(entry, dict):
+			if key == "result":
+				status, reason = outcome_of(entry)
+				if status == STEP_STATUS_SKIPPED:
+					if reason:
+						return step_skipped(reason)[:RUN_ERROR_MAX]
+					res = str(entry.get("result") or "")
+					if res.startswith(RESULT_SKIPPED_PREFIX):
+						return res[:RUN_ERROR_MAX]
+			else:
+				reason = _failure_text(entry)
+				if reason:
+					return reason[:RUN_ERROR_MAX]
+	return ""
+
+
+def _last_run_error(log_entries: list) -> str:
+	"""Extract the most recent step error message from a run log.
+
+	Args:
+		log_entries: List of log entry dictionaries from the run.
+
+	Returns:
+		str: Error message truncated to RUN_ERROR_MAX, or empty string.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	return _last_run_reason(log_entries, "error")
+
+
+def _mark_delivery_failure(run) -> None:
+	"""Show a run as Failed when WhatsApp reports one of its messages as failed after sending.
+
+	Display only: the stored run status is unchanged, and `delivery_failed` tells the UI
+	that Retry does not apply (retry_run accepts only runs stored as Failed).
+
+	Args:
+		run: Run dictionary or document to inspect and update in-place.
+
+	Returns:
+		None.
+
+	Raises:
+		None.
+
+	Side Effects:
+		Mutates run['status'], run['delivery_failed'], and run['error'] in-memory.
+	"""
+	failed = [e for e in run.log if isinstance(e, dict) and str(e.get("status") or "").lower() == MESSAGE_STATUS_FAILED]
+	if not failed or run.status == RUN_STATUS_FAILED:
+		return
+	run.status = RUN_STATUS_FAILED
+	run["delivery_failed"] = True
+	failed_entry = failed[-1]
+	reason = _failure_text(failed_entry) or DELIVERY_FAILED_DEFAULT_ERROR
+	run["error"] = str(reason)[:RUN_ERROR_MAX]
+
+
 @frappe.whitelist()
 def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
+	"""Retrieve execution runs for an automation with Channel Message delivery status merged.
+
+	Args:
+		name: Name of the Messaging Automation document.
+		limit: Maximum number of run records to retrieve.
+
+	Returns:
+		list[dict]: List of run dictionaries with parsed logs and merged delivery statuses.
+
+	Raises:
+		frappe.PermissionError: If user lacks read permission on Messaging Automation.
+
+	Side Effects:
+		None. Live join on read; no database write-back.
+	"""
 	check_read(DOCTYPE)
+	if not frappe.has_permission(DOCTYPE, "read", doc=name):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
 	rows = frappe.get_all(RUN_DOCTYPE, filters={"automation": name}, order_by="creation desc",
 		limit=max(1, min(frappe.utils.cint(limit) or RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT)),
 		fields=["name", "status", "trigger_id", "reference_doctype", "reference_name", "creation", "resume_at", "sent_count", "log"])
+	msg_names = set()
 	for r in rows:
 		try:
 			r.log = json.loads(r.log or "[]")
@@ -334,7 +495,101 @@ def get_runs(name: str, limit: int = RUN_LIST_DEFAULT_LIMIT) -> list[dict]:
 			r.log = []
 		r.creation = str(r.creation)
 		r.resume_at = str(r.resume_at) if r.resume_at else None
+		r["error"] = ""
+		r["delivery_failed"] = False
+		for entry in r.log:
+			if isinstance(entry, dict):
+				if entry.get("message"):
+					msg_names.add(entry["message"])
+				status, reason = outcome_of(entry)
+				if status is not None:
+					entry[STEP_OUTCOME_KEY] = status
+				if reason is not None:
+					entry["reason"] = reason
+
+	if msg_names:
+		cm_rows = frappe.get_all(
+			"Channel Message",
+			filters={"name": ["in", list(msg_names)]},
+			fields=["name", "status", "status_error", "failure_reason"],
+		)
+		cm_by_name = {cm["name"]: cm for cm in cm_rows}
+		for r in rows:
+			for entry in r.log:
+				if isinstance(entry, dict) and entry.get("message") in cm_by_name:
+					cm = cm_by_name[entry["message"]]
+					if cm.get("status"):
+						entry["status"] = cm["status"]
+					if cm.get("failure_reason"):
+						entry["failure_reason"] = cm["failure_reason"]
+					elif cm.get("status_error"):
+						entry["status_error"] = cm["status_error"]
+		for r in rows:
+			_mark_delivery_failure(r)
+
+	for r in rows:
+		if r.status == RUN_STATUS_FAILED:
+			r["error"] = _last_run_reason(r.log, "error") or (DELIVERY_FAILED_DEFAULT_ERROR if r.get("delivery_failed") else "")
+		elif r.status == RUN_STATUS_SKIPPED:
+			r["error"] = _last_run_reason(r.log, "result")
+
 	return rows
+
+
+@frappe.whitelist(methods=["POST"])
+def retry_run(run_name: str) -> dict:
+	"""Retry a failed automation execution run by queuing a new run.
+
+	Note:
+		A run where only some steps failed can resend already-sent steps (existing
+		already_sent/retrying guards limit this). A retry does not count toward the
+		monthly run plan gate.
+
+	Args:
+		run_name: Name of the failed Messaging Automation Run document.
+
+	Returns:
+		dict: {"name": str} with the newly queued run identifier.
+
+	Raises:
+		frappe.PermissionError: If user lacks write permission on Messaging Automation.
+		frappe.DoesNotExistError: If run_name does not exist.
+		frappe.ValidationError: If run is not Failed, context is empty/invalid, the automation is
+			paused, or the record is gone and the run saved no copy of it.
+
+	Side Effects:
+		Inserts an Automation Outbox record and schedules delivery.
+	"""
+	check_write(DOCTYPE)
+	if not run_name or not frappe.db.exists(RUN_DOCTYPE, run_name):
+		frappe.throw(_("Automation run {0} not found").format(run_name), frappe.DoesNotExistError)
+	run = frappe.get_doc(RUN_DOCTYPE, run_name)
+	if not frappe.has_permission(DOCTYPE, "write", doc=run.automation):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	if run.status != "Failed":
+		frappe.throw(_("Only failed runs can be retried"))
+	from msuite_automation.msuite_automation.engine.executor import _json, enqueue_run
+	ctx = _json(run.context, None)
+	if not ctx or not isinstance(ctx, dict):
+		frappe.throw(_("Cannot retry run with empty or invalid context"))
+	# run_automation skips silently in these two cases, so refuse up front instead of queuing a no-op.
+	if frappe.db.get_value(DOCTYPE, run.automation, "disabled"):
+		frappe.throw(_("Turn the automation on before retrying this run."))
+	if not ctx.get("doc_dict") and not frappe.db.exists(run.reference_doctype, run.reference_name):
+		frappe.throw(_("The record for this run no longer exists, so it can't be retried."))
+	new_name = enqueue_run(
+		name=run.automation,
+		trigger_id=run.trigger_id,
+		doctype=run.reference_doctype,
+		docname=run.reference_name,
+		value=ctx.get("value", ""),
+		discriminator=ctx.get("discriminator", ""),
+		doc_dict=ctx.get("doc_dict"),
+		skip_checks=True,
+		phone=ctx.get("phone"),
+		retry=True,
+	)
+	return {"name": new_name}
 
 
 @frappe.whitelist()

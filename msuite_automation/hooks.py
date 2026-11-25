@@ -30,6 +30,7 @@ doc_events = {
 		)
 	},
 	"Messaging Automation": {"before_insert": f"{PE}.enforce_gate", "before_save": f"{PE}.enforce_gate"},
+	"Messaging Automation Run": {"before_insert": f"{PE}.enforce_gate"},
 }
 
 # ── Order Notifications: subscribe to the order app's order_status_changed event ──
