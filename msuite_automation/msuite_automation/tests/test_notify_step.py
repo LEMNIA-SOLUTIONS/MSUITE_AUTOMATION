@@ -1,0 +1,519 @@
+import json
+import unittest
+from unittest.mock import patch
+
+import frappe
+
+from msuite_automation.msuite_automation.constants import (
+	NOTIFY_APP,
+	NOTIFY_DEFAULT_CATEGORY,
+	NOTIFY_DEFAULT_PRIORITY,
+	NOTIFY_DEFAULT_ROUTE,
+	NOTIFY_MODE_ASSIGNEE,
+	NOTIFY_MODE_FIELD,
+	NOTIFY_MODE_RECORD_OWNER,
+	NOTIFY_MODE_ROLE,
+	NOTIFY_MODE_SPECIFIC_USERS,
+	NOTIFY_TITLE_MAX,
+	RESULT_SENT,
+	RESULT_SKIPPED_DUPLICATE,
+	RESULT_SKIPPED_NO_RECIPIENT,
+	RESULT_SKIPPED_PUSH_UNAVAILABLE,
+	RUN_DOCTYPE,
+	SEND_NOTIFICATION,
+	SKIP_REASON_PUSH_UNAVAILABLE,
+	STEP_STATUS_ERROR,
+	UPDATE_FIELD,
+)
+from msuite_automation.msuite_automation.engine import channels, executor, notify, steps
+
+PUSH_PATH = "msuite_notification.services.queue.enqueue_push"
+IN_APP_PATH = "msuite_core.services.notifications.create_notification_log"
+ROLE_PREFIX = "ZZ Notify Role"
+USER_DOMAIN = "zznotify.example.com"
+AUTO_TITLE = "ZZ notify test"
+
+
+def _ensure_role(role_name: str) -> str:
+	if not frappe.db.exists("Role", role_name):
+		frappe.get_doc({"doctype": "Role", "role_name": role_name}).insert(ignore_permissions=True)
+	return role_name
+
+
+def _ensure_user(local_part: str, enabled: int = 1, roles: list[str] | None = None) -> str:
+	email = f"{local_part}@{USER_DOMAIN}"
+	if frappe.db.exists("User", email):
+		doc = frappe.get_doc("User", email)
+		doc.enabled = enabled
+		doc.roles = []
+		for r in roles or []:
+			doc.append("roles", {"role": r})
+		doc.flags.ignore_permissions = True
+		doc.save(ignore_permissions=True)
+		return email
+	doc = frappe.get_doc(
+		{
+			"doctype": "User",
+			"email": email,
+			"first_name": local_part,
+			"enabled": enabled,
+			"send_welcome_email": 0,
+			"user_type": "System User",
+			"roles": [{"role": r} for r in (roles or [])],
+		}
+	)
+	doc.flags.ignore_permissions = True
+	doc.insert(ignore_permissions=True)
+	return email
+
+
+def _make_todo(owner: str = "Administrator", allocated_to: str | None = None, status: str = "Open", **kw):
+	doc = frappe.get_doc(
+		{
+			"doctype": "ToDo",
+			"description": "ZZ notify todo",
+			"owner": owner,
+			"allocated_to": allocated_to,
+			"status": status,
+			**kw,
+		}
+	)
+	doc.flags.ignore_permissions = True
+	doc.insert(ignore_permissions=True)
+	return doc
+
+
+def _make_automation(step_rows: list[dict], edges: list[tuple[str, str, str]], send_frequency: str = "Every time") -> str:
+	doc = frappe.get_doc(
+		{
+			"doctype": "Messaging Automation",
+			"title": AUTO_TITLE,
+			"disabled": 1,
+			"send_frequency": send_frequency,
+			"triggers": [
+				{
+					"trigger_id": "t1",
+					"trigger_type": "Document Event",
+					"reference_doctype": "ToDo",
+					"doc_event": "After Save",
+				}
+			],
+			"steps": step_rows,
+			"edges": [{"source_id": a, "source_handle": h, "target_id": b} for a, h, b in edges],
+		}
+	)
+	doc.flags.ignore_plan_gate = True
+	doc.flags.ignore_validate = True
+	doc.insert(ignore_permissions=True, ignore_links=True)
+	frappe.db.set_value("Messaging Automation", doc.name, "disabled", 0)
+	return doc.name
+
+
+def _step(**kw) -> frappe._dict:
+	base = {
+		"step_id": "n1",
+		"step_type": SEND_NOTIFICATION,
+		"notify_push": 1,
+		"notify_in_app": 1,
+		"notify_mode": NOTIFY_MODE_SPECIFIC_USERS,
+		"notify_role": "",
+		"notify_users": "[]",
+		"notify_field": "",
+		"notify_title": "Alert: {{ doc.name }}",
+		"notify_body": "Body for {{ doc.description }}",
+		"notify_category": NOTIFY_DEFAULT_CATEGORY,
+		"notify_priority": NOTIFY_DEFAULT_PRIORITY,
+		"notify_route": "/todos/{{ doc.name }}",
+	}
+	base.update(kw)
+	return frappe._dict(base)
+
+
+def _ctx(step: frappe._dict, doc, automation_name: str = "MA-ZZ-NOTIFY", value: str = "val1", discriminator: str = "") -> frappe._dict:
+	return frappe._dict(
+		automation=frappe._dict(name=automation_name, send_frequency="Every time"),
+		doc=doc,
+		value=value,
+		discriminator=discriminator,
+		entry={},
+	)
+
+
+class TestNotifyStep(unittest.TestCase):
+	def setUp(self):
+		self._lock_keys: list[str] = []
+		self._cleanup()
+
+	def tearDown(self):
+		for key in self._lock_keys:
+			channels.release_lock(key)
+		self._cleanup()
+
+	def _cleanup(self):
+		frappe.db.rollback()
+		for name in frappe.get_all("Messaging Automation", filters={"title": AUTO_TITLE}, pluck="name"):
+			frappe.db.delete(RUN_DOCTYPE, {"automation": name})
+			frappe.delete_doc("Messaging Automation", name, force=True, ignore_permissions=True)
+		frappe.db.delete("ToDo", {"description": ("like", "ZZ notify%")})
+		frappe.db.delete("Notification Log", {"subject": ("like", "ZZ notify%")})
+		for user in frappe.get_all("User", filters={"email": ("like", f"%@{USER_DOMAIN}")}, pluck="name"):
+			frappe.delete_doc("User", user, force=True, ignore_permissions=True)
+		for role in frappe.get_all("Role", filters={"role_name": ("like", f"{ROLE_PREFIX}%")}, pluck="name"):
+			frappe.delete_doc("Role", role, force=True, ignore_permissions=True)
+
+	def _track_lock(self, ctx, step):
+		key = steps._dedupe_key(ctx, step, "notify")
+		self._lock_keys.append(key)
+		return key
+
+	def test_role_mode_returns_only_enabled_users(self):
+		role = _ensure_role(f"{ROLE_PREFIX} A")
+		enabled_u = _ensure_user("role_enabled", enabled=1, roles=[role])
+		_ensure_user("role_disabled", enabled=0, roles=[role])
+		_ensure_user("other_role_user", enabled=1, roles=[])
+
+		step = _step(notify_mode=NOTIFY_MODE_ROLE, notify_role=role)
+		doc = frappe._dict(doctype="ToDo", name="T-1")
+		self.assertEqual(notify.resolve_notify_recipients(step, doc), [enabled_u])
+
+	def test_specific_users_ignores_unknown_and_disabled(self):
+		u1 = _ensure_user("spec1", enabled=1)
+		u2 = _ensure_user("spec2", enabled=1)
+		disabled = _ensure_user("spec_off", enabled=0)
+
+		step = _step(
+			notify_mode=NOTIFY_MODE_SPECIFIC_USERS,
+			notify_users=json.dumps([u2, disabled, "unknown@nowhere.invalid", u1, u2]),
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-2")
+		self.assertEqual(notify.resolve_notify_recipients(step, doc), [u2, u1])
+
+	def test_owner_mode(self):
+		u1 = _ensure_user("owner_on", enabled=1)
+		u_off = _ensure_user("owner_off", enabled=0)
+		step = _step(notify_mode=NOTIFY_MODE_RECORD_OWNER)
+
+		self.assertEqual(notify.resolve_notify_recipients(step, frappe._dict(doctype="ToDo", name="T-3", owner=u1)), [u1])
+		self.assertEqual(notify.resolve_notify_recipients(step, frappe._dict(doctype="ToDo", name="T-3", owner=u_off)), [])
+
+	def test_assignee_mode_uses_open_todos_only(self):
+		u_open = _ensure_user("assign_open", enabled=1)
+		u_closed = _ensure_user("assign_closed", enabled=1)
+		u_cancelled = _ensure_user("assign_cancel", enabled=1)
+		u_disabled = _ensure_user("assign_off", enabled=0)
+
+		target = _make_todo()
+		_make_todo(reference_type="ToDo", reference_name=target.name, allocated_to=u_open, status="Open")
+		_make_todo(reference_type="ToDo", reference_name=target.name, allocated_to=u_closed, status="Closed")
+		_make_todo(reference_type="ToDo", reference_name=target.name, allocated_to=u_cancelled, status="Cancelled")
+		_make_todo(reference_type="ToDo", reference_name=target.name, allocated_to=u_disabled, status="Open")
+
+		step = _step(notify_mode=NOTIFY_MODE_ASSIGNEE)
+		self.assertEqual(notify.resolve_notify_recipients(step, target), [u_open])
+
+	def test_field_mode_splits_comma_and_semicolon_lists(self):
+		step = _step(notify_mode=NOTIFY_MODE_FIELD, notify_field="custom_recipients")
+		doc = frappe._dict(
+			doctype="ToDo",
+			name="T-5",
+			custom_recipients="a@x.com; b@x.com, a@x.com ; c@x.com ",
+		)
+		self.assertEqual(notify.resolve_notify_recipients(step, doc), ["a@x.com", "b@x.com", "c@x.com"])
+
+	@patch(PUSH_PATH, return_value=["PNL-1"])
+	@patch(IN_APP_PATH)
+	def test_field_mode_keeps_non_user_email_push_only(self, mock_in_app, mock_push):
+		u1 = _ensure_user("field_user", enabled=1)
+		non_user = "external_person@outside.invalid"
+		step = _step(
+			notify_mode=NOTIFY_MODE_FIELD,
+			notify_field="custom_recipients",
+			notify_push=1,
+			notify_in_app=1,
+			notify_title="ZZ notify field",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-6", description="d", custom_recipients=f"{u1}, {non_user}")
+		ctx = _ctx(step, doc, value="v-field")
+		self._track_lock(ctx, step)
+
+		self.assertEqual(notify.resolve_notify_recipients(step, doc), [u1, non_user])
+
+		res = notify.send_notification(ctx, step)
+		self.assertEqual(res, RESULT_SENT)
+		mock_in_app.assert_called_once()
+		self.assertEqual(mock_in_app.call_args.kwargs["recipient"], u1)
+		self.assertEqual(mock_push.call_count, 2)
+		self.assertEqual([c.kwargs["recipient"] for c in mock_push.call_args_list], [u1, non_user])
+
+	def test_guest_and_blank_dropped(self):
+		u1 = _ensure_user("valid_user", enabled=1)
+		spec_step = _step(
+			notify_mode=NOTIFY_MODE_SPECIFIC_USERS,
+			notify_users=json.dumps(["", "   ", None, "Guest", u1]),
+		)
+		field_step = _step(notify_mode=NOTIFY_MODE_FIELD, notify_field="custom_recipients")
+		doc = frappe._dict(doctype="ToDo", name="T-7", custom_recipients=f"Guest, ,   ; {u1}")
+
+		self.assertEqual(notify.resolve_notify_recipients(spec_step, doc), [u1])
+		self.assertEqual(notify.resolve_notify_recipients(field_step, doc), [u1])
+
+	@patch(PUSH_PATH)
+	@patch(IN_APP_PATH)
+	def test_no_recipients_is_skipped_no_recipient(self, mock_in_app, mock_push):
+		step = _step(notify_mode=NOTIFY_MODE_SPECIFIC_USERS, notify_users="[]")
+		doc = frappe._dict(doctype="ToDo", name="T-8", description="d")
+		ctx = _ctx(step, doc, value="v-empty")
+		self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SKIPPED_NO_RECIPIENT)
+		self.assertEqual(res.outcome_status, "skipped")
+		self.assertEqual(res.reason, "no recipient")
+		mock_in_app.assert_not_called()
+		mock_push.assert_not_called()
+
+	@patch(PUSH_PATH)
+	@patch(IN_APP_PATH)
+	def test_empty_rendered_title_is_step_error(self, mock_in_app, mock_push):
+		u1 = _ensure_user("empty_title", enabled=1)
+		for bad_title in ("", "   ", "{{ doc.nonexistent_field }}"):
+			step = _step(notify_users=json.dumps([u1]), notify_title=bad_title)
+			doc = frappe._dict(doctype="ToDo", name="T-9", description="d")
+			ctx = _ctx(step, doc, value="v-title")
+			res = steps.execute(ctx, step)
+			self.assertEqual(res.outcome_status, STEP_STATUS_ERROR)
+		mock_in_app.assert_not_called()
+		mock_push.assert_not_called()
+
+	def test_title_truncated_to_140(self):
+		long_title = "X" * 200
+		step = _step(notify_title=long_title, notify_body="b", notify_route="")
+		rendered = notify.render_notify(step, frappe._dict(doctype="ToDo", name="T-10"))
+		self.assertEqual(len(rendered["title"]), NOTIFY_TITLE_MAX)
+		self.assertEqual(rendered["title"], "X" * NOTIFY_TITLE_MAX)
+		self.assertEqual(rendered["route"], NOTIFY_DEFAULT_ROUTE)
+
+	def test_unicode_and_emoji_title(self):
+		prefix = "🚀 "
+		text = prefix + ("नमस्ते " * 40)
+		step = _step(notify_title=text, notify_body="🎉 {{ doc.name }}", notify_route="/app")
+		rendered = notify.render_notify(step, frappe._dict(doctype="ToDo", name="T-11"))
+		self.assertEqual(len(rendered["title"]), NOTIFY_TITLE_MAX)
+		self.assertTrue(rendered["title"].startswith(prefix))
+		self.assertEqual(rendered["body"], "🎉 T-11")
+
+	def test_jinja_missing_field_renders_blank(self):
+		step = _step(notify_title="Hi {{ doc.name }}", notify_body="Missing:[{{ doc.does_not_exist }}]")
+		rendered = notify.render_notify(step, frappe._dict(doctype="ToDo", name="T-12"))
+		self.assertEqual(rendered["title"], "Hi T-12")
+		self.assertEqual(rendered["body"], "Missing:[]")
+
+	def test_invalid_jinja_gives_readable_error(self):
+		step = _step(notify_title="Broken {{ doc.name", notify_body="ok")
+		doc = frappe._dict(doctype="ToDo", name="T-13", description="d")
+		with self.assertRaises(frappe.ValidationError) as err:
+			notify.render_notify(step, doc)
+		self.assertIn("template", str(err.exception).lower())
+
+		res = steps.execute(_ctx(step, doc, value="v-jinja"), step)
+		self.assertEqual(res.outcome_status, STEP_STATUS_ERROR)
+		self.assertIn("template", res.reason.lower())
+
+	@patch("frappe.publish_realtime")
+	@patch(PUSH_PATH)
+	def test_in_app_only_never_calls_push(self, mock_push, mock_realtime):
+		u1 = _ensure_user("in_app_only", enabled=1)
+		step = _step(
+			notify_push=0,
+			notify_in_app=1,
+			notify_users=json.dumps([u1]),
+			notify_title="ZZ notify bell {{ doc.name }}",
+			notify_body="Bell body",
+			notify_route="/custom/{{ doc.name }}",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-14", description="desc")
+		ctx = _ctx(step, doc, value="v-inapp")
+		self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SENT)
+		mock_push.assert_not_called()
+
+		log_row = frappe.db.get_value(
+			"Notification Log",
+			{"for_user": u1, "document_type": "ToDo", "document_name": "T-14"},
+			["subject", "email_content", "msuite_route", "read"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(log_row)
+		self.assertEqual(log_row.subject, "ZZ notify bell T-14")
+		self.assertEqual(log_row.email_content, "Bell body")
+		self.assertEqual(log_row.msuite_route, "/custom/T-14")
+		self.assertEqual(log_row.read, 0)
+		mock_realtime.assert_called()
+
+	@patch(PUSH_PATH, return_value=["PNL-15"])
+	@patch(IN_APP_PATH)
+	def test_push_only_never_creates_bell_row(self, mock_in_app, mock_push):
+		u1 = _ensure_user("push_only", enabled=1)
+		step = _step(
+			notify_push=1,
+			notify_in_app=0,
+			notify_users=json.dumps([u1]),
+			notify_title="Push {{ doc.name }}",
+			notify_body="Push body",
+			notify_category="Billing",
+			notify_priority="normal",
+			notify_route="/billing/{{ doc.name }}",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-15", description="desc")
+		ctx = _ctx(step, doc, value="v-push")
+		key = self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SENT)
+		mock_in_app.assert_not_called()
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_name": "T-15"}), 0)
+		mock_push.assert_called_once_with(
+			recipient=u1,
+			title="Push T-15",
+			body="Push body",
+			data={"screen": "/billing/T-15", "entity_type": "ToDo", "entity_name": "T-15"},
+			priority="normal",
+			category="Billing",
+			idempotency_key=f"{key}:{u1}",
+			source_doctype="ToDo",
+			source_name="T-15",
+			enqueue_after_commit=True,
+		)
+
+	@patch(PUSH_PATH, return_value=["PNL-16"])
+	@patch(IN_APP_PATH)
+	def test_both_channels(self, mock_in_app, mock_push):
+		u1 = _ensure_user("both_1", enabled=1)
+		u2 = _ensure_user("both_2", enabled=1)
+		step = _step(
+			notify_push=1,
+			notify_in_app=1,
+			notify_users=json.dumps([u1, u2]),
+			notify_title="Both {{ doc.name }}",
+			notify_body="Both body",
+			notify_route="",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-16", description="desc")
+		ctx = _ctx(step, doc, value="v-both")
+		self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SENT)
+		self.assertEqual(mock_in_app.call_count, 2)
+		self.assertEqual(mock_push.call_count, 2)
+		self.assertEqual(mock_in_app.call_args_list[0].kwargs["msuite_route"], NOTIFY_DEFAULT_ROUTE)
+		self.assertIsNone(mock_in_app.call_args_list[0].kwargs["route"])
+
+	@patch(PUSH_PATH)
+	@patch(IN_APP_PATH)
+	def test_app_not_installed_still_sends_in_app(self, mock_in_app, mock_push):
+		u1 = _ensure_user("no_app_user", enabled=1)
+		doc = frappe._dict(doctype="ToDo", name="T-17", description="d")
+		apps_without_notify = [app for app in frappe.get_installed_apps() if app != NOTIFY_APP]
+
+		with patch("frappe.get_installed_apps", return_value=apps_without_notify):
+			both_step = _step(notify_push=1, notify_in_app=1, notify_users=json.dumps([u1]))
+			ctx1 = _ctx(both_step, doc, value="v-noapp-1")
+			self._track_lock(ctx1, both_step)
+			self.assertEqual(steps.execute(ctx1, both_step), RESULT_SENT)
+			mock_in_app.assert_called_once()
+			mock_push.assert_not_called()
+
+			push_only_step = _step(notify_push=1, notify_in_app=0, notify_users=json.dumps([u1]))
+			ctx2 = _ctx(push_only_step, doc, value="v-noapp-2")
+			self._track_lock(ctx2, push_only_step)
+			res = steps.execute(ctx2, push_only_step)
+			self.assertEqual(res, RESULT_SKIPPED_PUSH_UNAVAILABLE)
+			self.assertEqual(res.outcome_status, "skipped")
+			self.assertEqual(res.reason, SKIP_REASON_PUSH_UNAVAILABLE)
+
+	@patch(PUSH_PATH, return_value=[])
+	@patch(IN_APP_PATH)
+	def test_push_disabled_in_config_is_not_a_failure(self, mock_in_app, mock_push):
+		u1 = _ensure_user("cfg_off_user", enabled=1)
+		doc = frappe._dict(doctype="ToDo", name="T-18", description="d")
+
+		both_step = _step(notify_push=1, notify_in_app=1, notify_users=json.dumps([u1]))
+		ctx1 = _ctx(both_step, doc, value="v-cfgoff-1")
+		self._track_lock(ctx1, both_step)
+		self.assertEqual(steps.execute(ctx1, both_step), RESULT_SENT)
+		mock_in_app.assert_called_once()
+
+		push_only_step = _step(notify_push=1, notify_in_app=0, notify_users=json.dumps([u1]))
+		ctx2 = _ctx(push_only_step, doc, value="v-cfgoff-2")
+		self._track_lock(ctx2, push_only_step)
+		res = steps.execute(ctx2, push_only_step)
+		self.assertEqual(res, RESULT_SKIPPED_PUSH_UNAVAILABLE)
+		self.assertEqual(res.outcome_status, "skipped")
+		self.assertEqual(res.reason, SKIP_REASON_PUSH_UNAVAILABLE)
+
+	@patch(PUSH_PATH, return_value=["PNL-19"])
+	@patch(IN_APP_PATH)
+	def test_duplicate_run_sends_once(self, mock_in_app, mock_push):
+		u1 = _ensure_user("dedupe_user", enabled=1)
+		step = _step(notify_users=json.dumps([u1]))
+		doc = frappe._dict(doctype="ToDo", name="T-19", description="d")
+		ctx = _ctx(step, doc, value="v-dup-1")
+		self._track_lock(ctx, step)
+
+		first = steps.execute(ctx, step)
+		second = steps.execute(ctx, step)
+		self.assertEqual(first, RESULT_SENT)
+		self.assertEqual(second, RESULT_SKIPPED_DUPLICATE)
+		mock_in_app.assert_called_once()
+		mock_push.assert_called_once()
+
+	@patch(PUSH_PATH, return_value=["PNL-20"])
+	@patch(IN_APP_PATH)
+	def test_retry_run_does_not_double_send(self, mock_in_app, mock_push):
+		u1 = _ensure_user("retry_user", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[
+				dict(_step(step_id="n1", notify_users=json.dumps([u1]))),
+				{"step_id": "u1", "step_type": UPDATE_FIELD, "update_field": "nonexistent_bad_field", "update_value": "x"},
+			],
+			[("t1", "", "n1"), ("n1", "", "u1")],
+			send_frequency="Every time",
+		)
+		step_obj = frappe._dict(step_id="n1")
+		self._lock_keys.append(
+			steps._dedupe_key(
+				frappe._dict(automation=frappe._dict(name=auto_name), doc=todo, value="v-retry", discriminator="d1"),
+				step_obj,
+				"notify",
+			)
+		)
+
+		with patch.object(steps, "_save_field", side_effect=frappe.ValidationError("bad value")):
+			run1 = executor.run_automation(auto_name, "t1", "ToDo", todo.name, value="v-retry", discriminator="d1")
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run1, "status"), "Failed")
+		mock_in_app.assert_called_once()
+		mock_push.assert_called_once()
+
+		# Retrying the same run context skips the already-sent notification step via the dedupe lock
+		run2 = executor.run_automation(auto_name, "t1", "ToDo", todo.name, value="v-retry", discriminator="d1", skip_checks=True, retry=True)
+		self.assertIsNotNone(run2)
+		log2 = json.loads(frappe.db.get_value(RUN_DOCTYPE, run2, "log"))
+		n1_entry = next(e for e in log2 if e["step_id"] == "n1")
+		self.assertEqual(n1_entry["result"], RESULT_SKIPPED_DUPLICATE)
+		mock_in_app.assert_called_once()
+		mock_push.assert_called_once()
+
+	@patch(PUSH_PATH)
+	@patch(IN_APP_PATH)
+	def test_all_channels_off_is_step_error(self, mock_in_app, mock_push):
+		u1 = _ensure_user("all_off", enabled=1)
+		step = _step(notify_push=0, notify_in_app=0, notify_users=json.dumps([u1]))
+		doc = frappe._dict(doctype="ToDo", name="T-21", description="d")
+		res = steps.execute(_ctx(step, doc, value="v-off"), step)
+		self.assertEqual(res.outcome_status, STEP_STATUS_ERROR)
+		mock_in_app.assert_not_called()
+		mock_push.assert_not_called()

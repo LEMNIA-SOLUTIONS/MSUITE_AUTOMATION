@@ -60,6 +60,7 @@ from msuite_automation.msuite_automation.constants import (
 	SEND_EMAIL,
 	SEND_IG_CONSENT_TEMPLATE,
 	SEND_IG_PUBLIC_REPLY,
+	SEND_NOTIFICATION,
 	SEND_SMS,
 	SEND_WHATSAPP,
 	SKIP_REASON_ALREADY_IN_LIST,
@@ -577,4 +578,8 @@ def execute(ctx, step) -> StepOutcome:
 		return send_ig_public_reply(ctx, step)
 	if step.step_type == SEND_IG_CONSENT_TEMPLATE:
 		return send_ig_consent_template(ctx, step)
+	if step.step_type == SEND_NOTIFICATION:
+		from msuite_automation.msuite_automation.engine import notify
+
+		return notify.send_notification(ctx, step)
 	return step_skipped(f"unknown step type {step.step_type}")
