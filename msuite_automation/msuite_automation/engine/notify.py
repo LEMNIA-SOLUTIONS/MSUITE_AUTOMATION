@@ -105,7 +105,7 @@ def _users_by_enabled(candidates: list[str], enabled: int) -> set[str]:
 	)
 
 
-def _parse_user_list(raw) -> list:
+def parse_notify_users(raw) -> list:
 	"""Parse notify_users JSON string or list into candidate entries.
 
 	Args:
@@ -167,7 +167,7 @@ def resolve_notify_recipients(step, doc) -> list[str]:
 				order_by="parent asc",
 			)
 	elif mode == NOTIFY_MODE_SPECIFIC_USERS:
-		candidates = _parse_user_list(g(step, "notify_users"))
+		candidates = parse_notify_users(g(step, "notify_users"))
 	elif mode == NOTIFY_MODE_RECORD_OWNER:
 		owner = g(doc, "owner")
 		if owner:
@@ -336,17 +336,12 @@ def send_notification(ctx, step) -> StepOutcome:
 
 		enabled_users = _users_by_enabled(recipients, 1) if use_in_app else set()
 		push_fn = None
-		push_unavailable = False
-		if use_push:
-			if NOTIFY_APP in (frappe.get_installed_apps() or []):
-				from msuite_notification.services.queue import enqueue_push
+		if use_push and NOTIFY_APP in (frappe.get_installed_apps() or []):
+			from msuite_notification.services.queue import enqueue_push
 
-				push_fn = enqueue_push
-			else:
-				push_unavailable = True
+			push_fn = enqueue_push
 
 		delivered = False
-		push_queued = False
 		# ponytail: one Log + one job per user; add a cap/batch only if a role grows past a few hundred
 		for recipient in recipients:
 			if use_in_app and recipient in enabled_users:
@@ -379,13 +374,11 @@ def send_notification(ctx, step) -> StepOutcome:
 				except Exception:
 					frappe.log_error(title=NOTIFY_PUSH_ERROR_LOG_TITLE, message=frappe.get_traceback())
 				else:
-					if log_names:
-						push_queued = True
-						delivered = True
+					delivered = delivered or bool(log_names)
 
 		if delivered:
 			return True
-		if not use_in_app and use_push and (push_unavailable or not push_queued):
+		if not use_in_app and use_push:
 			skip_reason = SKIP_REASON_PUSH_UNAVAILABLE
 		return False
 

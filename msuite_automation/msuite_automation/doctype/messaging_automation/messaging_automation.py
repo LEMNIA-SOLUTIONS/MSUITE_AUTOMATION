@@ -43,6 +43,7 @@ from msuite_automation.msuite_automation.constants import (
 	UPDATE_FIELD,
 )
 from msuite_automation.msuite_automation.engine.filters import get_virtual_field_resolver
+from msuite_automation.msuite_automation.engine.notify import parse_notify_users
 from msuite_automation.msuite_automation.engine.graph import (
 	Graph,
 	_to_int,
@@ -210,14 +211,8 @@ class MessagingAutomation(Document):
 		if mode == NOTIFY_MODE_ROLE and not str(st.notify_role or "").strip():
 			frappe.throw(_("{0}: role is required when recipient mode is {1}").format(what, NOTIFY_MODE_ROLE))
 		if mode == NOTIFY_MODE_SPECIFIC_USERS:
-			raw_users = st.notify_users
-			if isinstance(raw_users, str):
-				parsed = _json(raw_users, None) if raw_users.strip() else []
-			elif isinstance(raw_users, list):
-				parsed = raw_users
-			else:
-				parsed = None
-			if not isinstance(parsed, list) or not any(str(u or "").strip() for u in parsed):
+			parsed = parse_notify_users(st.notify_users)
+			if not any(str(u or "").strip() for u in parsed):
 				frappe.throw(_("{0}: select at least one user in {1} mode").format(what, NOTIFY_MODE_SPECIFIC_USERS))
 		if mode == NOTIFY_MODE_FIELD:
 			field_name = str(st.notify_field or "").strip()
