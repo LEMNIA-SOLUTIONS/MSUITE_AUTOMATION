@@ -23,17 +23,27 @@ from msuite_automation.msuite_automation.constants import (
 	FIELD_CHANGE,
 	FIELD_MOBILE_NO,
 	IF_ELSE,
+	NOTIFY_CATEGORIES,
+	NOTIFY_ERROR_EMPTY_TITLE,
+	NOTIFY_ERROR_NO_CHANNEL,
+	NOTIFY_MODE_FIELD,
+	NOTIFY_MODE_ROLE,
+	NOTIFY_MODE_SPECIFIC_USERS,
+	NOTIFY_MODES,
+	NOTIFY_PRIORITIES,
 	OFFSET_DAYS_MAX,
 	OFFSET_DAYS_MIN,
 	SKIP_MAPPING_CHECK_FLAG,
 	SCHEDULE,
 	SEND_EMAIL,
+	SEND_NOTIFICATION,
 	SEND_SMS,
 	SEND_WHATSAPP,
 	SWITCH,
 	UPDATE_FIELD,
 )
 from msuite_automation.msuite_automation.engine.filters import get_virtual_field_resolver
+from msuite_automation.msuite_automation.engine.notify import parse_notify_users
 from msuite_automation.msuite_automation.engine.graph import (
 	Graph,
 	_to_int,
@@ -174,6 +184,49 @@ class MessagingAutomation(Document):
 		if fieldname not in STANDARD_DOC_FIELDS and not frappe.get_meta(doctype).has_field(fieldname):
 			frappe.throw(_("{0}: field {1} does not exist on {2}").format(what, fieldname, doctype))
 
+	def _validate_notify_step(self, st, graph, check, what):
+		"""Validate Send Notification step channels, recipient mode, title, category, and priority.
+
+		Args:
+			st: Automation Step child row.
+			graph: Compiled automation Graph for reaching-DocType resolution.
+			check: Field-existence validator callable ``(fieldname, doctype, what)``.
+			what: Human-readable step label (``Step <step_id>``).
+
+		Returns:
+			None.
+
+		Raises:
+			frappe.ValidationError: If any channel, recipient configuration, field,
+				title, category, or priority check fails.
+
+		Side Effects:
+			None.
+		"""
+		if not frappe.utils.cint(st.notify_push) and not frappe.utils.cint(st.notify_in_app):
+			frappe.throw(_("{0}: {1}").format(what, NOTIFY_ERROR_NO_CHANNEL))
+		mode = st.notify_mode
+		if mode not in NOTIFY_MODES:
+			frappe.throw(_("{0}: recipient mode must be one of {1}").format(what, ", ".join(NOTIFY_MODES)))
+		if mode == NOTIFY_MODE_ROLE and not str(st.notify_role or "").strip():
+			frappe.throw(_("{0}: role is required when recipient mode is {1}").format(what, NOTIFY_MODE_ROLE))
+		if mode == NOTIFY_MODE_SPECIFIC_USERS:
+			parsed = parse_notify_users(st.notify_users)
+			if not any(str(u or "").strip() for u in parsed):
+				frappe.throw(_("{0}: select at least one user in {1} mode").format(what, NOTIFY_MODE_SPECIFIC_USERS))
+		if mode == NOTIFY_MODE_FIELD:
+			field_name = str(st.notify_field or "").strip()
+			if not field_name:
+				frappe.throw(_("{0}: recipient field is required when recipient mode is {1}").format(what, NOTIFY_MODE_FIELD))
+			for dt in graph.reaching_doctypes(st.step_id):
+				check(field_name, dt, what)
+		if not str(st.notify_title or "").strip():
+			frappe.throw(_("{0}: {1}").format(what, NOTIFY_ERROR_EMPTY_TITLE))
+		if st.notify_category not in NOTIFY_CATEGORIES:
+			frappe.throw(_("{0}: category must be one of {1}").format(what, ", ".join(NOTIFY_CATEGORIES)))
+		if st.notify_priority not in NOTIFY_PRIORITIES:
+			frappe.throw(_("{0}: priority must be one of {1}").format(what, ", ".join(NOTIFY_PRIORITIES)))
+
 	def _validate_fields_exist(self):
 		check = self._check
 		trigger_by_id = {t.trigger_id: t for t in self.triggers if t.trigger_id}
@@ -195,6 +248,8 @@ class MessagingAutomation(Document):
 		graph = Graph(self.triggers, self.steps, self.edges)
 		for st in self.steps:
 			what = _("Step {0}").format(st.step_id)
+			if st.step_type == SEND_NOTIFICATION:
+				self._validate_notify_step(st, graph, check, what)
 			if st.step_type == UPDATE_FIELD:
 				if st.update_field in PROTECTED_UPDATE_FIELDS:
 					frappe.throw(_("Step {0}: field {1} cannot be updated").format(st.step_id, st.update_field))

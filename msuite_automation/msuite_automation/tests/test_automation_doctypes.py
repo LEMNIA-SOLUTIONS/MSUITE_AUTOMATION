@@ -63,5 +63,5 @@ class TestAutomationDoctypes(unittest.TestCase):
 
 		self.assertEqual(c.SWITCH, "Switch")
 		self.assertIn(c.SWITCH, c.STEP_TYPES)
-		self.assertEqual(set(c.ACTION_TYPES), {c.SEND_WHATSAPP, c.SEND_EMAIL, c.SEND_SMS, c.UPDATE_FIELD, c.ADD_TO_LIST, c.SEND_IG_PUBLIC_REPLY, c.SEND_IG_CONSENT_TEMPLATE})
+		self.assertEqual(set(c.ACTION_TYPES), {c.SEND_WHATSAPP, c.SEND_EMAIL, c.SEND_SMS, c.UPDATE_FIELD, c.ADD_TO_LIST, c.SEND_IG_PUBLIC_REPLY, c.SEND_IG_CONSENT_TEMPLATE, c.SEND_NOTIFICATION})
 		self.assertEqual((c.PATH_RUNNING, c.PATH_WAITING, c.PATH_AT_JOIN, c.PATH_ENDED), ("Running", "Waiting", "At join", "Ended"))

@@ -1,6 +1,17 @@
+import json
 import unittest
 
 import frappe
+
+from msuite_automation.msuite_automation.constants import (
+	NOTIFY_DEFAULT_CATEGORY,
+	NOTIFY_DEFAULT_PRIORITY,
+	NOTIFY_MODE_FIELD,
+	NOTIFY_MODE_RECORD_OWNER,
+	NOTIFY_MODE_ROLE,
+	NOTIFY_MODE_SPECIFIC_USERS,
+	SEND_NOTIFICATION,
+)
 
 
 class TestControllerValidation(unittest.TestCase):
@@ -296,4 +307,109 @@ class TestControllerValidation(unittest.TestCase):
 			draft.variable_mappings = []
 			with self.assertRaisesRegex(frappe.ValidationError, r"map \{\{1\}\}"):
 				draft.save(ignore_permissions=True)
+
+	def _notify_doc(self, step_overrides=None, **doc_kw):
+		step = {
+			"step_id": "n1",
+			"step_type": SEND_NOTIFICATION,
+			"notify_push": 1,
+			"notify_in_app": 1,
+			"notify_mode": NOTIFY_MODE_RECORD_OWNER,
+			"notify_title": "Alert {{ doc.name }}",
+			"notify_body": "Body",
+			"notify_category": NOTIFY_DEFAULT_CATEGORY,
+			"notify_priority": NOTIFY_DEFAULT_PRIORITY,
+		}
+		if step_overrides:
+			step.update(step_overrides)
+		kw = {
+			"steps": [step],
+			"edges": [{"source_id": "t1", "source_handle": "", "target_id": "n1"}],
+		}
+		kw.update(doc_kw)
+		return self._doc(**kw)
+
+	def test_save_rejected_when_no_channel_ticked(self):
+		d = self._notify_doc({"notify_push": 0, "notify_in_app": 0})
+		with self.assertRaisesRegex(frappe.ValidationError, r"Step n1:.*channel"):
+			d.insert(ignore_permissions=True)
+
+	def test_save_rejected_role_mode_without_role(self):
+		d = self._notify_doc({"notify_mode": NOTIFY_MODE_ROLE, "notify_role": ""})
+		with self.assertRaisesRegex(frappe.ValidationError, r"Step n1:.*role"):
+			d.insert(ignore_permissions=True)
+
+	def test_save_rejected_specific_users_empty(self):
+		for bad_users in ("[]", "", "not-json", '{"a": 1}', '["", "  "]'):
+			with self.subTest(notify_users=bad_users):
+				d = self._notify_doc({"notify_mode": NOTIFY_MODE_SPECIFIC_USERS, "notify_users": bad_users})
+				with self.assertRaisesRegex(frappe.ValidationError, r"Step n1:.*user"):
+					d.insert(ignore_permissions=True)
+
+	def test_save_rejected_field_mode_unknown_field(self):
+		d_blank = self._notify_doc({"notify_mode": NOTIFY_MODE_FIELD, "notify_field": ""})
+		with self.assertRaisesRegex(frappe.ValidationError, r"Step n1:.*field"):
+			d_blank.insert(ignore_permissions=True)
+
+		d_unknown = self._notify_doc({"notify_mode": NOTIFY_MODE_FIELD, "notify_field": "no_such_field"})
+		with self.assertRaisesRegex(frappe.ValidationError, r"Step n1: field no_such_field does not exist on ToDo"):
+			d_unknown.insert(ignore_permissions=True)
+
+		# Must exist on every DocType reaching the step (`allocated_to` exists on ToDo, not Note)
+		d_multi = self._notify_doc(
+			{"notify_mode": NOTIFY_MODE_FIELD, "notify_field": "allocated_to"},
+			triggers=[
+				{"trigger_id": "t1", "trigger_type": "Document Event", "reference_doctype": "ToDo", "doc_event": "After Save"},
+				{"trigger_id": "t2", "trigger_type": "Document Event", "reference_doctype": "Note", "doc_event": "After Save"},
+			],
+			edges=[
+				{"source_id": "t1", "source_handle": "", "target_id": "n1"},
+				{"source_id": "t2", "source_handle": "", "target_id": "n1"},
+			],
+		)
+		with self.assertRaisesRegex(frappe.ValidationError, r"Step n1: field allocated_to does not exist on Note"):
+			d_multi.insert(ignore_permissions=True)
+
+		# Valid standard field across reaching DocTypes passes
+		d_ok = self._notify_doc({"notify_mode": NOTIFY_MODE_FIELD, "notify_field": "owner"})
+		d_ok.insert(ignore_permissions=True)
+
+	def test_save_rejected_title_blank(self):
+		for bad_title in ("", "   ", None):
+			with self.subTest(notify_title=bad_title):
+				d = self._notify_doc({"notify_title": bad_title})
+				with self.assertRaisesRegex(frappe.ValidationError, r"Step n1:.*title"):
+					d.insert(ignore_permissions=True)
+
+	def test_save_rejected_category_not_in_list(self):
+		for bad_cat in ("Bogus", ""):
+			with self.subTest(notify_category=bad_cat):
+				d = self._notify_doc({"notify_category": bad_cat})
+				with self.assertRaisesRegex(frappe.ValidationError, r"Step n1:.*category"):
+					d.insert(ignore_permissions=True)
+
+		for bad_prio in ("urgent", ""):
+			with self.subTest(notify_priority=bad_prio):
+				d = self._notify_doc({"notify_priority": bad_prio})
+				with self.assertRaisesRegex(frappe.ValidationError, r"Step n1:.*priority"):
+					d.insert(ignore_permissions=True)
+
+	def test_draft_save_allowed_with_warning_only(self):
+		# Unconnected Notify step: draft save succeeds with orange warning; activation is blocked.
+		frappe.local.message_log = []
+		draft = self._notify_doc(disabled=1, edges=[])
+		draft.insert(ignore_permissions=True)
+		warnings = [m.get("message", "") for m in frappe.local.message_log if m.get("indicator") == "orange"]
+		self.assertTrue(any("not connected to the flow" in w for w in warnings), frappe.local.message_log)
+
+		draft.disabled = 0
+		with self.assertRaisesRegex(frappe.ValidationError, "not connected to the flow"):
+			draft.save(ignore_permissions=True)
+
+		# Connecting the Notify step allows activation (proves Send Notification counts as an action).
+		draft.reload()
+		draft.disabled = 0
+		draft.append("edges", {"source_id": "t1", "source_handle": "", "target_id": "n1"})
+		draft.save(ignore_permissions=True)
+		self.assertEqual(draft.disabled, 0)
 
