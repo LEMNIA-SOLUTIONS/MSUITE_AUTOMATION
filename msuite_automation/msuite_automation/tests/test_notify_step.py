@@ -19,6 +19,7 @@ from msuite_automation.msuite_automation.constants import (
 	NOTIFY_PUSH_ERROR_LOG_TITLE,
 	NOTIFY_TITLE_MAX,
 	RESULT_SENT,
+	RESULT_SKIPPED_ALREADY_SENT,
 	RESULT_SKIPPED_DUPLICATE,
 	RESULT_SKIPPED_NO_RECIPIENT,
 	RESULT_SKIPPED_PUSH_UNAVAILABLE,
@@ -26,8 +27,12 @@ from msuite_automation.msuite_automation.constants import (
 	RUN_STATUS_COMPLETED,
 	RUN_STATUS_FAILED,
 	SEND_NOTIFICATION,
+	SKIP_REASON_ALREADY_SENT,
 	SKIP_REASON_PUSH_UNAVAILABLE,
+	STEP_OUTCOME_KEY,
 	STEP_STATUS_ERROR,
+	STEP_STATUS_SENT,
+	STEP_STATUS_SKIPPED,
 	UPDATE_FIELD,
 )
 from msuite_automation.msuite_automation.engine import channels, executor, notify, preview, steps
@@ -889,3 +894,177 @@ class TestNotifyStep(unittest.TestCase):
 		df = frappe.get_meta("Automation Step").get_field("notify_mode")
 		self.assertIsNotNone(df)
 		self.assertEqual(df.default, NOTIFY_MODE_ROLE)
+
+	@patch("frappe.publish_realtime")
+	@patch("frappe.enqueue")
+	@patch(PUSH_PATH, return_value=["PNL-RETRY-1"])
+	def test_retry_skips_notify_node_already_sent(self, mock_push, _mock_enqueue, _mock_realtime):
+		frappe.set_user("Administrator")
+		u1 = _ensure_user("retry_doc_event", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[
+				dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="ZZ notify retry {{ doc.name }}")),
+				{"step_id": "u1", "step_type": UPDATE_FIELD, "update_field": "status", "update_value": "Closed"},
+			],
+			[("t1", "", "n1"), ("n1", "", "u1")],
+			send_frequency="Every time",
+		)
+
+		with patch.object(steps, "_save_field", side_effect=frappe.ValidationError("bad value")):
+			run1 = executor.run_automation(auto_name, "t1", "ToDo", todo.name)
+
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run1, "status"), RUN_STATUS_FAILED)
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 1)
+		self.assertEqual(mock_push.call_count, 1)
+
+		res = api.retry_run(run1)
+		executor.deliver_outbox(res["name"])
+
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 1)
+		self.assertEqual(mock_push.call_count, 1)
+
+		runs = frappe.get_all(RUN_DOCTYPE, filters={"automation": auto_name, "name": ("!=", run1)}, fields=["name", "status", "log"])
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0].status, RUN_STATUS_COMPLETED)
+		log2 = json.loads(runs[0].log)
+		n1_entry = next(e for e in log2 if e["step_id"] == "n1")
+		self.assertEqual(n1_entry["result"], RESULT_SKIPPED_ALREADY_SENT)
+		self.assertEqual(n1_entry.get(STEP_OUTCOME_KEY), STEP_STATUS_SKIPPED)
+		self.assertEqual(n1_entry.get("reason"), SKIP_REASON_ALREADY_SENT)
+
+	@patch("frappe.publish_realtime")
+	@patch("frappe.enqueue")
+	@patch(PUSH_PATH, return_value=["PNL-RETRY-ERR"])
+	def test_retry_reattempts_notify_that_errored(self, mock_push, _mock_enqueue, _mock_realtime):
+		frappe.set_user("Administrator")
+		u1 = _ensure_user("retry_notify_err", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="ZZ notify err {{ doc.name }}"))],
+			[("t1", "", "n1")],
+		)
+
+		with patch.object(notify, "render_notify", side_effect=frappe.ValidationError("bad template")):
+			run1 = executor.run_automation(auto_name, "t1", "ToDo", todo.name)
+
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run1, "status"), RUN_STATUS_FAILED)
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 0)
+		mock_push.assert_not_called()
+
+		res = api.retry_run(run1)
+		executor.deliver_outbox(res["name"])
+
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 1)
+		self.assertEqual(mock_push.call_count, 1)
+
+		runs = frappe.get_all(RUN_DOCTYPE, filters={"automation": auto_name, "name": ("!=", run1)}, fields=["name", "status", "log"])
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0].status, RUN_STATUS_COMPLETED)
+		log2 = json.loads(runs[0].log)
+		n1_entry = next(e for e in log2 if e["step_id"] == "n1")
+		self.assertEqual(n1_entry["result"], RESULT_SENT)
+		self.assertEqual(n1_entry.get(STEP_OUTCOME_KEY), STEP_STATUS_SENT)
+
+	@patch("frappe.publish_realtime")
+	@patch("frappe.enqueue")
+	@patch(PUSH_PATH, return_value=["PNL-GARBLED"])
+	def test_retry_with_garbled_log_does_not_crash(self, mock_push, _mock_enqueue, _mock_realtime):
+		frappe.set_user("Administrator")
+		u1 = _ensure_user("retry_garbled", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="ZZ notify garbled {{ doc.name }}"))],
+			[("t1", "", "n1")],
+		)
+
+		for bad_log in ("{not valid json", "", "{}", json.dumps([123, None, "bad"])):
+			failed_run = frappe.get_doc({
+				"doctype": RUN_DOCTYPE,
+				"automation": auto_name,
+				"trigger_id": "t1",
+				"reference_doctype": "ToDo",
+				"reference_name": todo.name,
+				"status": RUN_STATUS_FAILED,
+				"context": json.dumps({"value": ""}),
+				"log": bad_log,
+			}).insert(ignore_permissions=True, ignore_links=True)
+			self.assertEqual(executor._sent_notification_nodes(failed_run.name), frozenset())
+
+		res = api.retry_run(failed_run.name)
+		executor.deliver_outbox(res["name"])
+
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 1)
+		self.assertEqual(mock_push.call_count, 1)
+
+	def test_retry_of_missing_run_is_empty_set(self):
+		self.assertEqual(executor._sent_notification_nodes(None), frozenset())
+		self.assertEqual(executor._sent_notification_nodes(""), frozenset())
+		self.assertEqual(executor._sent_notification_nodes("RUN-DOES-NOT-EXIST-ZZ"), frozenset())
+
+	@patch("frappe.publish_realtime")
+	@patch("frappe.enqueue")
+	@patch(PUSH_PATH, return_value=["PNL-TWO"])
+	def test_two_notify_nodes_only_the_sent_one_is_skipped(self, mock_push, _mock_enqueue, _mock_realtime):
+		frappe.set_user("Administrator")
+		u1 = _ensure_user("two_nodes_1", enabled=1)
+		u2 = _ensure_user("two_nodes_2", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[
+				dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="ZZ notify node1 {{ doc.name }}")),
+				dict(_step(step_id="n2", notify_users=json.dumps([u2]), notify_title="ZZ notify node2 {{ doc.name }}")),
+			],
+			[("t1", "", "n1"), ("n1", "", "n2")],
+		)
+
+		real_render = notify.render_notify
+
+		def fail_n2(step, doc):
+			if step.step_id == "n2":
+				raise frappe.ValidationError("n2 template error")
+			return real_render(step, doc)
+
+		with patch.object(notify, "render_notify", side_effect=fail_n2):
+			run1 = executor.run_automation(auto_name, "t1", "ToDo", todo.name)
+
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run1, "status"), RUN_STATUS_FAILED)
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 1)
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u2, "document_type": "ToDo", "document_name": todo.name}), 0)
+		self.assertEqual(mock_push.call_count, 1)
+
+		res = api.retry_run(run1)
+		executor.deliver_outbox(res["name"])
+
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 1)
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u2, "document_type": "ToDo", "document_name": todo.name}), 1)
+		self.assertEqual(mock_push.call_count, 2)
+		self.assertEqual([c.kwargs["recipient"] for c in mock_push.call_args_list], [u1, u2])
+
+		runs = frappe.get_all(RUN_DOCTYPE, filters={"automation": auto_name, "name": ("!=", run1)}, fields=["name", "status", "log"])
+		self.assertEqual(len(runs), 1)
+		self.assertEqual(runs[0].status, RUN_STATUS_COMPLETED)
+		log2 = json.loads(runs[0].log)
+		n1_entry = next(e for e in log2 if e["step_id"] == "n1")
+		n2_entry = next(e for e in log2 if e["step_id"] == "n2")
+		self.assertEqual(n1_entry["result"], RESULT_SKIPPED_ALREADY_SENT)
+		self.assertEqual(n2_entry["result"], RESULT_SENT)
+
+	@patch("frappe.publish_realtime")
+	@patch(PUSH_PATH, return_value=["PNL-NONRETRY"])
+	def test_non_retry_run_unaffected(self, mock_push, _mock_realtime):
+		u1 = _ensure_user("non_retry", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="ZZ notify nonretry {{ doc.name }}"))],
+			[("t1", "", "n1")],
+			send_frequency="Every time",
+		)
+
+		run1 = executor.run_automation(auto_name, "t1", "ToDo", todo.name)
+		run2 = executor.run_automation(auto_name, "t1", "ToDo", todo.name)
+
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run1, "status"), RUN_STATUS_COMPLETED)
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run2, "status"), RUN_STATUS_COMPLETED)
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 2)
+		self.assertEqual(mock_push.call_count, 2)

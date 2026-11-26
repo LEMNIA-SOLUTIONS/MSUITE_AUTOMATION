@@ -25,6 +25,7 @@ from msuite_automation.msuite_automation.constants import (
 	NOTIFY_MODE_SPECIFIC_USERS,
 	NOTIFY_PUSH_ERROR_LOG_TITLE,
 	NOTIFY_TITLE_MAX,
+	RESULT_SKIPPED_ALREADY_SENT,
 	RESULT_SKIPPED_NO_RECIPIENT,
 	SKIP_REASON_PUSH_UNAVAILABLE,
 	StepOutcome,
@@ -282,22 +283,25 @@ def render_notify(step, doc) -> dict:
 def send_notification(ctx, step) -> StepOutcome:
 	"""Execute a Send Notification step across push and/or in-app bell channels.
 
-	Acquires the standard step deduplication lock via ``steps._send`` so duplicate
-	runs and retries do not double-send, and scopes push idempotency keys by
-	``ctx.run`` (``f"{dedupe_base}:{run_id}:{recipient}"``) so separate runs on
-	the same record do not collide. Missing ``msuite_notification`` app or
-	disabled Push Notification Config does not fail the step: in-app still runs,
-	and push-only steps skip with SKIP_REASON_PUSH_UNAVAILABLE. Per-recipient push
-	enqueue exceptions are logged via ``frappe.log_error`` without failing the run
-	or stopping delivery to remaining recipients.
+	Skips immediately with ``RESULT_SKIPPED_ALREADY_SENT`` when ``step.step_id``
+	is in ``ctx.already_sent_nodes`` (from a retried run). Acquires the standard
+	step deduplication lock via ``steps._send`` so duplicate runs and retries do
+	not double-send, and scopes push idempotency keys by ``ctx.run``
+	(``f"{dedupe_base}:{run_id}:{recipient}"``) so separate runs on the same record
+	do not collide. Missing ``msuite_notification`` app or disabled Push
+	Notification Config does not fail the step: in-app still runs, and push-only
+	steps skip with SKIP_REASON_PUSH_UNAVAILABLE. Per-recipient push enqueue
+	exceptions are logged via ``frappe.log_error`` without failing the run or
+	stopping delivery to remaining recipients.
 
 	Args:
-		ctx: Automation execution context containing automation, doc, value, discriminator, run, entry.
+		ctx: Automation execution context containing automation, doc, value,
+			discriminator, run, entry, and optional ``already_sent_nodes``.
 		step: Automation Step document or dict.
 
 	Returns:
-		StepOutcome: ``sent``, ``skipped: no recipient``, ``skipped: push unavailable``,
-			``skipped: duplicate``, or ``error: ...``.
+		StepOutcome: ``sent``, ``skipped: already sent``, ``skipped: no recipient``,
+			``skipped: push unavailable``, ``skipped: duplicate``, or ``error: ...``.
 
 	Raises:
 		channels.SendRetry: Propagated from ``steps._send`` when lock guard is unavailable.
@@ -306,6 +310,9 @@ def send_notification(ctx, step) -> StepOutcome:
 		Acquires/releases deduplication cache locks, inserts Notification Log rows and publishes
 		realtime events (in-app), and enqueues Push Notification Log jobs (push).
 	"""
+	if g(step, "step_id") in (ctx.get("already_sent_nodes") or ()):
+		return RESULT_SKIPPED_ALREADY_SENT
+
 	from msuite_core.services.notifications import create_notification_log
 	from msuite_automation.msuite_automation.engine.steps import _dedupe_key, _send
 

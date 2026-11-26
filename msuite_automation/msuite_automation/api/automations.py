@@ -541,9 +541,9 @@ def retry_run(run_name: str) -> dict:
 	"""Retry a failed automation execution run by queuing a new run.
 
 	Note:
-		A run where only some steps failed can resend already-sent steps (existing
-		already_sent/retrying guards limit this). A retry does not count toward the
-		monthly run plan gate.
+		Passes ``retry_of=run.name`` so Notify steps already sent in the failed run
+		are skipped; other send steps rely on existing already_sent/retrying guards.
+		A retry does not count toward the monthly run plan gate.
 
 	Args:
 		run_name: Name of the failed Messaging Automation Run document.
@@ -588,6 +588,7 @@ def retry_run(run_name: str) -> dict:
 		skip_checks=True,
 		phone=ctx.get("phone"),
 		retry=True,
+		retry_of=run.name,
 	)
 	return {"name": new_name}
 

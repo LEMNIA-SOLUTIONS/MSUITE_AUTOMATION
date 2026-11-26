@@ -16,8 +16,8 @@ from msuite_automation.msuite_automation.constants import (
 	ADD_TO_LIST, DOCTYPE, IF_ELSE, ONCE_PER_DAY, ONCE_PER_DOCUMENT, OUTBOX_DOCTYPE, PATH_RUNNING, PATH_WAITING, QUEUE_SHORT,
 	RECIPIENT_SKIP_REASONS, RESULT_SKIPPED_PREFIX, RESULT_SKIPPED_RECIPIENT_REASONS, RETRY_NOTE_MAX, RUN_CLAIM_TTL_SECONDS, RUN_DOCTYPE, RUN_ERROR_MAX,
 	RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, RUN_STATUS_WAITING,
-	SCHEDULE, SEND_EMAIL, SEND_SMS, SEND_WHATSAPP,
-	STEP_OUTCOME_KEY, STEP_STATUS_ADDED, STEP_STATUS_ERROR, STEP_STATUS_SKIPPED, STEP_STATUS_UPDATED,
+	SCHEDULE, SEND_EMAIL, SEND_NOTIFICATION, SEND_SMS, SEND_WHATSAPP,
+	SKIP_REASON_ALREADY_SENT, STEP_OUTCOME_KEY, STEP_STATUS_ADDED, STEP_STATUS_ERROR, STEP_STATUS_SENT, STEP_STATUS_SKIPPED, STEP_STATUS_UPDATED,
 	STUCK_SWEEP_BATCH, SWITCH, UPDATE_FIELD, WAIT, WAIT_EVENT, WAIT_SIGNAL,
 	outcome_of,
 )
@@ -60,11 +60,38 @@ def enqueue_safely(method, **kwargs) -> None:
 	frappe.db.after_commit.add(enqueue_call)
 
 
-def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
-	"""Record a trigger event in the outbox (same transaction as the caller's save, so it commits or rolls
-	back with it) and queue its delivery after commit. If the queued job is lost, redeliver_outbox re-queues it."""
+def enqueue_run(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False, retry_of: str | None = None):
+	"""Record a trigger event in the outbox and queue its delivery after commit.
+
+	Inserts an Automation Event Outbox row in the caller's transaction so it commits
+	or rolls back with the trigger write. If the queued job is lost, ``redeliver_outbox``
+	re-queues it.
+
+	Args:
+		name: Messaging Automation document name.
+		trigger_id: Trigger node ID on the automation graph.
+		doctype: Reference DocType name.
+		docname: Reference document name.
+		value: Optional trigger value (e.g. field-change new value).
+		discriminator: Optional deduplication discriminator.
+		doc_dict: Optional serialized document snapshot.
+		skip_checks: Bypass trigger/frequency checks when True (used on retry/scheduled scripts).
+		phone: Optional override phone number.
+		retry: Mark this run as a user-requested retry (skips monthly run plan gate).
+		retry_of: Name of the failed Messaging Automation Run being retried, if any.
+
+	Returns:
+		str: Name of the inserted Automation Event Outbox record.
+
+	Raises:
+		None.
+
+	Side Effects:
+		Inserts an Automation Event Outbox document and schedules ``deliver_outbox`` after commit.
+	"""
 	payload = dict(name=name, trigger_id=trigger_id, doctype=doctype, docname=docname, value=value,
-		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone, retry=retry)
+		discriminator=discriminator, doc_dict=doc_dict, skip_checks=skip_checks, phone=phone, retry=retry,
+		retry_of=retry_of)
 	row = frappe.get_doc({"doctype": OUTBOX_DOCTYPE, "payload": json.dumps(payload, default=str)}).insert(ignore_permissions=True)
 	enqueue_safely(DELIVER_OUTBOX_PATH, queue=QUEUE_SHORT,
 		job_id=f"{OUTBOX_JOB_PREFIX}:{row.name}", deduplicate=True, outbox=row.name)
@@ -426,12 +453,81 @@ def _persist(run, paths, log) -> None:
 	run.save(ignore_permissions=True)
 
 
+def _sent_notification_nodes(run_name: str | None) -> frozenset[str]:
+	"""Return node IDs of Send Notification steps that already sent in a prior run.
+
+	Reads ``run_name``'s ``log`` JSON and collects ``node_id`` for every entry with
+	``step_type == SEND_NOTIFICATION`` whose outcome is ``STEP_STATUS_SENT`` (or
+	``skipped: already sent`` from an earlier retry). Returns an empty set when the
+	run is missing, has an empty log, or has invalid JSON (never raises).
+
+	Args:
+		run_name: Name of the prior Messaging Automation Run, or None.
+
+	Returns:
+		frozenset[str]: Node IDs already sent that should be skipped on retry.
+
+	Raises:
+		None.
+
+	Side Effects:
+		Queries the ``log`` field of Messaging Automation Run when ``run_name`` is set.
+	"""
+	if not run_name:
+		return frozenset()
+	try:
+		raw = frappe.db.get_value(RUN_DOCTYPE, run_name, "log")
+	except Exception:
+		return frozenset()
+	if not raw:
+		return frozenset()
+	try:
+		entries = json.loads(raw) if isinstance(raw, str) else raw
+	except (TypeError, ValueError):
+		return frozenset()
+	if not isinstance(entries, list):
+		return frozenset()
+	nodes: set[str] = set()
+	for entry in entries:
+		if not isinstance(entry, dict) or entry.get("step_type") != SEND_NOTIFICATION:
+			continue
+		status, reason = outcome_of(entry)
+		if status == STEP_STATUS_SENT or (status == STEP_STATUS_SKIPPED and reason == SKIP_REASON_ALREADY_SENT):
+			node_id = entry.get("node_id") or entry.get("step_id")
+			if node_id:
+				nodes.add(str(node_id))
+	return frozenset(nodes)
+
+
 def _walk(automation, run, doc, ctx_data, paths):
+	"""Advance active paths across the automation graph and persist run state.
+
+	Builds the execution context (including ``already_sent_nodes`` loaded from
+	``ctx_data.get("retry_of")``), runs ``walker.advance``, appends any path
+	errors to the run log, and calls ``_persist``.
+
+	Args:
+		automation: Messaging Automation document.
+		run: Messaging Automation Run document.
+		doc: Target trigger document.
+		ctx_data: Context dict loaded from run parameters or ``run.context``.
+		paths: Initial or resumed list of path dicts to advance.
+
+	Returns:
+		None.
+
+	Raises:
+		None. Propagates unexpected persistence/execution exceptions to caller.
+
+	Side Effects:
+		Executes automation steps, updates ``run.log``/``run.paths``/``run.status``, and saves ``run``.
+	"""
 	graph = Graph(automation.triggers, automation.steps, automation.edges)
 	log = json.loads(run.log or "[]")
 	ctx = frappe._dict(automation=automation, doc=doc, value=ctx_data.get("value") or "",
 		discriminator=ctx_data.get("discriminator") or "", trigger_id=run.trigger_id, phone=ctx_data.get("phone"),
-		run_started_at=getattr(run, "creation", None), run=getattr(run, "name", None))
+		run_started_at=getattr(run, "creation", None), run=getattr(run, "name", None),
+		already_sent_nodes=_sent_notification_nodes(ctx_data.get("retry_of")))
 	counter = itertools.count(len(paths) + 1)
 	paths = advance(graph, paths, _node_executor(automation, graph, ctx, log), lambda: f"p{next(counter)}")
 	log.extend({"path_id": p["path_id"], "node_id": p["node_id"], "step_id": p["node_id"], "result": "error", "error": p.pop("error"),
@@ -440,8 +536,36 @@ def _walk(automation, run, doc, ctx_data, paths):
 	_persist(run, paths, log)
 
 
-def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False):
-	"""Run one automation for one record. `retry=True` marks a user-requested retry of a failed run, which does not count toward the monthly run limit."""
+def run_automation(name, trigger_id, doctype, docname, value="", discriminator="", doc_dict=None, skip_checks=False, phone=None, retry=False, retry_of: str | None = None):
+	"""Run one automation for one record.
+
+	``retry=True`` marks a user-requested retry of a failed run, which does not
+	count toward the monthly run limit. When ``retry_of`` is given, Notify steps
+	already sent in that run are skipped with ``skipped: already sent``.
+
+	Args:
+		name: Messaging Automation document name.
+		trigger_id: Trigger node ID on the automation graph.
+		doctype: Reference DocType name.
+		docname: Reference document name.
+		value: Optional trigger value.
+		discriminator: Optional deduplication discriminator.
+		doc_dict: Optional serialized document snapshot.
+		skip_checks: Skip trigger filters and frequency checks when True.
+		phone: Optional override phone number.
+		retry: Whether this run is a retry (bypasses monthly run plan gate).
+		retry_of: Name of the failed Messaging Automation Run being retried, if any.
+
+	Returns:
+		str | None: Created Messaging Automation Run name, or None if skipped/failed early.
+
+	Raises:
+		None. Unexpected errors mark the run Failed and log to Error Log.
+
+	Side Effects:
+		Acquires run claim locks when applicable, inserts and updates a Messaging Automation Run,
+		and executes step side effects (messages, notifications, field updates).
+	"""
 	run, claim_key, run_saved = None, None, False
 	try:
 		automation = frappe.get_doc(DOCTYPE, name)
@@ -473,6 +597,8 @@ def run_automation(name, trigger_id, doctype, docname, value="", discriminator="
 				return None
 			claim_key = key
 		ctx_data = {"value": value, "discriminator": discriminator, "doc_dict": doc_dict, "phone": phone}
+		if retry_of:
+			ctx_data["retry_of"] = retry_of
 		run = frappe.get_doc({"doctype": RUN_DOCTYPE, "automation": name, "trigger_id": trigger.trigger_id, "status": "Running",
 			"reference_doctype": doctype, "reference_name": ref_name, "context": json.dumps(ctx_data, default=str),
 			"log": json.dumps([{"path_id": "p1", "node_id": trigger.trigger_id, "step_id": trigger.trigger_id, "step_type": "Trigger", "result": "started", "at": str(now_datetime())}])})

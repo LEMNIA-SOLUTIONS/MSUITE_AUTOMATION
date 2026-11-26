@@ -323,6 +323,7 @@ class TestAutomationsApi(unittest.TestCase):
 				skip_checks=True,
 				phone="+919876543210",
 				retry=True,
+				retry_of=failed_run.name,
 			)
 
 		# 5. Permission denied for guest
