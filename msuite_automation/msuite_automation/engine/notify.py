@@ -31,33 +31,23 @@ from msuite_automation.msuite_automation.constants import (
 	step_error,
 	step_skipped,
 )
+from msuite_core.services.notifications import sanitize_route
 from msuite_automation.msuite_automation.engine.filters import field_value
 from msuite_automation.msuite_automation.engine.graph import g
 
 _FIELD_SPLIT_RE = re.compile(r"[,;]")
-
-
-def _doc_attr(doc, key: str, default=None):
-	"""Read an attribute or dict key from a Document or dict safely.
-
-	Args:
-		doc: Frappe Document, dict, or object.
-		key: Attribute or key name.
-		default: Fallback when missing or None.
-
-	Returns:
-		Any: Resolved value or default.
-
-	Raises:
-		None.
-
-	Side Effects:
-		None.
-	"""
-	if doc is None:
-		return default
-	val = doc.get(key) if hasattr(doc, "get") else getattr(doc, key, None)
-	return default if val is None else val
+_SAFE_FRAPPE_HELPERS = (
+	"bold",
+	"date_format",
+	"format",
+	"format_date",
+	"format_value",
+	"lang",
+	"number_format",
+	"sanitize_html",
+	"time_format",
+	"utils",
+)
 
 
 def _clean_dedupe(candidates: list) -> list[str]:
@@ -88,27 +78,28 @@ def _clean_dedupe(candidates: list) -> list[str]:
 	return out
 
 
-def _enabled_users(candidates: list[str]) -> set[str]:
-	"""Return the subset of candidate IDs that exist as enabled Users.
+def _users_by_enabled(candidates: list[str], enabled: int) -> set[str]:
+	"""Return the subset of candidate IDs present in User with the given enabled flag.
 
 	Args:
-		candidates: List of candidate user IDs.
+		candidates: List of candidate user/recipient IDs.
+		enabled: Expected ``User.enabled`` flag (1 for enabled, 0 for disabled).
 
 	Returns:
-		set[str]: User IDs present in User with enabled=1.
+		set[str]: Matching User document names.
 
 	Raises:
 		None.
 
 	Side Effects:
-		Queries the User table once.
+		Queries the User table once when ``candidates`` is non-empty.
 	"""
 	if not candidates:
 		return set()
 	return set(
 		frappe.get_all(
 			"User",
-			filters={"name": ["in", candidates], "enabled": 1},
+			filters={"name": ["in", candidates], "enabled": enabled},
 			pluck="name",
 		)
 	)
@@ -146,8 +137,9 @@ def resolve_notify_recipients(step, doc) -> list[str]:
 	"""Resolve ordered, de-duplicated notification recipients for a Send Notification step.
 
 	Supports Role, Specific Users, Record Owner, Assignee, and Field on Record modes.
-	Drops blanks and Guest. All modes except Field on Record drop disabled or non-existent
-	Users; Field on Record splits on comma/semicolon and preserves non-User emails for push.
+	Drops blanks and Guest. Non-field modes keep only enabled Users; Field on Record
+	splits on comma/semicolon, drops disabled Users (``enabled=0``), and preserves
+	non-User email identifiers for push-only delivery.
 
 	Args:
 		step: Automation Step document or dict.
@@ -177,12 +169,12 @@ def resolve_notify_recipients(step, doc) -> list[str]:
 	elif mode == NOTIFY_MODE_SPECIFIC_USERS:
 		candidates = _parse_user_list(g(step, "notify_users"))
 	elif mode == NOTIFY_MODE_RECORD_OWNER:
-		owner = _doc_attr(doc, "owner")
+		owner = g(doc, "owner")
 		if owner:
 			candidates = [owner]
 	elif mode == NOTIFY_MODE_ASSIGNEE:
-		doctype = _doc_attr(doc, "doctype")
-		docname = _doc_attr(doc, "name")
+		doctype = g(doc, "doctype")
+		docname = g(doc, "name")
 		if doctype and docname:
 			candidates = frappe.get_all(
 				"ToDo",
@@ -199,18 +191,23 @@ def resolve_notify_recipients(step, doc) -> list[str]:
 			candidates = _FIELD_SPLIT_RE.split(str(raw))
 
 	cleaned = _clean_dedupe(candidates)
-	if not cleaned or mode == NOTIFY_MODE_FIELD:
+	if not cleaned:
 		return cleaned
+	if mode == NOTIFY_MODE_FIELD:
+		disabled = _users_by_enabled(cleaned, 0)
+		return [recipient for recipient in cleaned if recipient not in disabled]
 
-	enabled = _enabled_users(cleaned)
+	enabled = _users_by_enabled(cleaned, 1)
 	return [recipient for recipient in cleaned if recipient in enabled]
 
 
 def _render_template_field(raw: str | None, context: dict, field_label: str) -> str:
-	"""Render one Jinja template string with readable ValidationError on syntax/eval failure.
+	"""Render one Jinja template string with restricted globals and readable ValidationError.
 
-	Uses Frappe's sandboxed Jinja environment overlaid so missing/None fields render as
-	blank strings rather than literal 'None' or DebugUndefined placeholders.
+	Uses Frappe's sandboxed Jinja environment (``get_jenv(restrict_globals=True)``)
+	overlaid so missing/None fields render as blank strings rather than literal
+	'None' or DebugUndefined placeholders, and limits the exposed ``frappe`` namespace
+	to safe formatting helpers (blocking DB/doc/network access).
 
 	Args:
 		raw: Template source string (empty/None returns empty string).
@@ -235,7 +232,11 @@ def _render_template_field(raw: str | None, context: dict, field_label: str) -> 
 		from jinja2 import Undefined
 		from frappe.utils.jinja import get_jenv, safe_render_flags
 
-		jenv = get_jenv().overlay(undefined=Undefined, finalize=lambda v: "" if v is None else v)
+		base_jenv = get_jenv(restrict_globals=True)
+		jenv = base_jenv.overlay(undefined=Undefined, finalize=lambda v: "" if v is None else v)
+		jenv.globals = base_jenv.globals.copy()
+		frappe_ns = base_jenv.globals.get("frappe") or {}
+		jenv.globals["frappe"] = {k: frappe_ns[k] for k in _SAFE_FRAPPE_HELPERS if k in frappe_ns}
 		compiled = jenv.from_string(text)
 		with safe_render_flags():
 			return compiled.render(context)
@@ -244,10 +245,10 @@ def _render_template_field(raw: str | None, context: dict, field_label: str) -> 
 
 
 def render_notify(step, doc) -> dict:
-	"""Render notification title, body, and route against ``{"doc": doc}``.
+	"""Render notification title, body, and sanitized route against ``{"doc": doc}``.
 
-	Truncates the rendered title to NOTIFY_TITLE_MAX characters and falls back
-	empty routes to NOTIFY_DEFAULT_ROUTE.
+	Truncates the rendered title to NOTIFY_TITLE_MAX characters and sanitizes the
+	rendered route via ``sanitize_route`` (falling back to NOTIFY_DEFAULT_ROUTE).
 
 	Args:
 		step: Automation Step document or dict.
@@ -257,7 +258,7 @@ def render_notify(step, doc) -> dict:
 		dict: ``{"title": str, "body": str, "route": str}``.
 
 	Raises:
-		frappe.ValidationError: If any notification template has invalid Jinja.
+		frappe.ValidationError: If any notification template has invalid or blocked Jinja.
 
 	Side Effects:
 		None.
@@ -265,7 +266,10 @@ def render_notify(step, doc) -> dict:
 	context = {"doc": doc}
 	title = _render_template_field(g(step, "notify_title"), context, "title")[:NOTIFY_TITLE_MAX]
 	body = _render_template_field(g(step, "notify_body"), context, "body")
-	route = _render_template_field(g(step, "notify_route"), context, "route").strip() or NOTIFY_DEFAULT_ROUTE
+	route = sanitize_route(
+		_render_template_field(g(step, "notify_route"), context, "route"),
+		default=NOTIFY_DEFAULT_ROUTE,
+	)
 	return {"title": title, "body": body, "route": route}
 
 
@@ -273,14 +277,16 @@ def send_notification(ctx, step) -> StepOutcome:
 	"""Execute a Send Notification step across push and/or in-app bell channels.
 
 	Acquires the standard step deduplication lock via ``steps._send`` so duplicate
-	runs and retries do not double-send. Missing ``msuite_notification`` app or
+	runs and retries do not double-send, and scopes push idempotency keys by
+	``ctx.run`` (``f"{dedupe_base}:{run_id}:{recipient}"``) so separate runs on
+	the same record do not collide. Missing ``msuite_notification`` app or
 	disabled Push Notification Config does not fail the step: in-app still runs,
 	and push-only steps skip with SKIP_REASON_PUSH_UNAVAILABLE. Per-recipient push
 	enqueue exceptions are logged via ``frappe.log_error`` without failing the run
 	or stopping delivery to remaining recipients.
 
 	Args:
-		ctx: Automation execution context containing automation, doc, value, discriminator, entry.
+		ctx: Automation execution context containing automation, doc, value, discriminator, run, entry.
 		step: Automation Step document or dict.
 
 	Returns:
@@ -316,9 +322,10 @@ def send_notification(ctx, step) -> StepOutcome:
 	route = rendered["route"]
 	category = g(step, "notify_category") or NOTIFY_DEFAULT_CATEGORY
 	priority = g(step, "notify_priority") or NOTIFY_DEFAULT_PRIORITY
-	doctype = _doc_attr(doc, "doctype")
-	docname = _doc_attr(doc, "name")
+	doctype = g(doc, "doctype")
+	docname = g(doc, "name")
 	dedupe_base = _dedupe_key(ctx, step, NOTIFY_CHANNEL_KEY)
+	run_id = ctx.get("run") or ""
 	skip_reason: str | None = None
 
 	def _deliver() -> bool:
@@ -327,7 +334,7 @@ def send_notification(ctx, step) -> StepOutcome:
 		if not recipients:
 			return False
 
-		enabled_users = _enabled_users(recipients) if use_in_app else set()
+		enabled_users = _users_by_enabled(recipients, 1) if use_in_app else set()
 		push_fn = None
 		push_unavailable = False
 		if use_push:
@@ -364,7 +371,7 @@ def send_notification(ctx, step) -> StepOutcome:
 						data={"screen": route, "entity_type": doctype, "entity_name": docname},
 						priority=priority,
 						category=category,
-						idempotency_key=f"{dedupe_base}:{recipient}",
+						idempotency_key=f"{dedupe_base}:{run_id}:{recipient}",
 						source_doctype=doctype,
 						source_name=docname,
 						enqueue_after_commit=True,

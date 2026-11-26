@@ -230,6 +230,23 @@ def switch_handle(step, doc) -> str:
 
 
 def _node_executor(automation, graph, ctx, log):
+	"""Build the per-node execution callback used by ``walker.advance``.
+
+	Args:
+		automation: Messaging Automation document.
+		graph: Graph instance for the automation.
+		ctx: Base execution context dictionary.
+		log: Mutable list of run log entry dicts appended in place.
+
+	Returns:
+		Callable: ``execute(path, node_id) -> str`` callback.
+
+	Raises:
+		None.
+
+	Side Effects:
+		Appends step entries to ``log`` and mutates ``path`` retry/wait fields.
+	"""
 	def execute(path, node_id):
 		step = graph.steps[node_id]
 		entry = {"path_id": path["path_id"], "node_id": node_id, "step_id": node_id, "step_type": step.step_type, "at": str(now_datetime())}
@@ -267,6 +284,9 @@ def _node_executor(automation, graph, ctx, log):
 				entry[STEP_OUTCOME_KEY] = getattr(outcome, STEP_OUTCOME_KEY)
 			if hasattr(outcome, "reason") and outcome.reason is not None:
 				entry["reason"] = outcome.reason
+			if getattr(outcome, STEP_OUTCOME_KEY, None) == STEP_STATUS_ERROR:
+				err_text = getattr(outcome, "reason", None) or str(outcome)
+				entry["error"] = str(err_text)[:RUN_ERROR_MAX]
 			path["retry_count"] = 0
 		except Exception as e:
 			delays = RETRY_DELAYS.get(e.kind, ()) if isinstance(e, channels.SendRetry) else ()
@@ -284,6 +304,30 @@ def _node_executor(automation, graph, ctx, log):
 			frappe.log_error(title=f"Messaging Automation {automation.name} step {node_id} failed")
 		return ""
 	return execute
+
+
+def _is_step_error(entry: dict | None) -> bool:
+	"""Return True if a run log entry represents a step error.
+
+	Matches both legacy ``result == "error"`` entries and structured
+	``outcome_status == "error"`` entries (e.g. from ``step_error(reason)``
+	whose ``result`` is ``"error: <reason>"``).
+
+	Args:
+		entry: Run log entry dictionary or None.
+
+	Returns:
+		bool: True when the entry errored, False otherwise.
+
+	Raises:
+		None.
+
+	Side Effects:
+		None.
+	"""
+	if not isinstance(entry, dict):
+		return False
+	return entry.get("result") == "error" or entry.get(STEP_OUTCOME_KEY) == STEP_STATUS_ERROR
 
 
 def is_recipient_skip(entry: dict) -> bool:
@@ -354,8 +398,8 @@ def _persist(run, paths, log) -> None:
 			node_key = (entry.get("path_id"), entry.get("node_id") or entry.get("step_id"))
 			last_sends[node_key] = entry
 	# A rejected Update Field value or any send that errored fails the run (retry skips sends already made).
-	update_failed = any(entry.get("step_type") == UPDATE_FIELD and entry.get("result") == "error" for entry in log)
-	failed = update_failed or any(entry.get("result") == "error" for entry in last_sends.values())
+	update_failed = any(entry.get("step_type") == UPDATE_FIELD and _is_step_error(entry) for entry in log)
+	failed = update_failed or any(_is_step_error(entry) for entry in last_sends.values())
 	waiting = any(p["status"] == PATH_WAITING for p in paths)
 	all_skipped = bool(last_sends) and all(
 		is_recipient_skip(entry) for entry in last_sends.values()

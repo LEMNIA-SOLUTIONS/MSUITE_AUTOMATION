@@ -71,7 +71,7 @@
   {"fieldname": "notify_section", "fieldtype": "Section Break", "label": "Notification", "depends_on": "eval:doc.step_type=='Send Notification'"},
   {"fieldname": "notify_push", "fieldtype": "Check", "label": "Send Push Notification", "default": "1", "depends_on": "eval:doc.step_type=='Send Notification'"},
   {"fieldname": "notify_in_app", "fieldtype": "Check", "label": "Send In-App Notification", "default": "1", "depends_on": "eval:doc.step_type=='Send Notification'"},
-  {"fieldname": "notify_mode", "fieldtype": "Select", "label": "Recipient Mode", "options": "Role\nSpecific Users\nRecord Owner\nAssignee\nField on Record", "depends_on": "eval:doc.step_type=='Send Notification'"},
+  {"fieldname": "notify_mode", "fieldtype": "Select", "label": "Recipient Mode", "options": "Role\nSpecific Users\nRecord Owner\nAssignee\nField on Record", "default": "Role", "depends_on": "eval:doc.step_type=='Send Notification'"},
   {"fieldname": "notify_role", "fieldtype": "Link", "label": "Role", "options": "Role", "depends_on": "eval:doc.step_type=='Send Notification'"},
   {"fieldname": "notify_users", "fieldtype": "Code", "label": "Users", "options": "JSON", "description": "JSON list of User IDs", "depends_on": "eval:doc.step_type=='Send Notification'"},
   {"fieldname": "notify_field", "fieldtype": "Data", "label": "Recipient Field", "depends_on": "eval:doc.step_type=='Send Notification'"},

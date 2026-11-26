@@ -10,6 +10,7 @@ from msuite_automation.msuite_automation.constants import (
 	NOTIFY_DEFAULT_CATEGORY,
 	NOTIFY_DEFAULT_PRIORITY,
 	NOTIFY_DEFAULT_ROUTE,
+	NOTIFY_ERROR_EMPTY_TITLE,
 	NOTIFY_MODE_ASSIGNEE,
 	NOTIFY_MODE_FIELD,
 	NOTIFY_MODE_RECORD_OWNER,
@@ -22,6 +23,8 @@ from msuite_automation.msuite_automation.constants import (
 	RESULT_SKIPPED_NO_RECIPIENT,
 	RESULT_SKIPPED_PUSH_UNAVAILABLE,
 	RUN_DOCTYPE,
+	RUN_STATUS_COMPLETED,
+	RUN_STATUS_FAILED,
 	SEND_NOTIFICATION,
 	SKIP_REASON_PUSH_UNAVAILABLE,
 	STEP_STATUS_ERROR,
@@ -383,7 +386,7 @@ class TestNotifyStep(unittest.TestCase):
 			data={"screen": "/billing/T-15", "entity_type": "ToDo", "entity_name": "T-15"},
 			priority="normal",
 			category="Billing",
-			idempotency_key=f"{key}:{u1}",
+			idempotency_key=f"{key}::{u1}",
 			source_doctype="ToDo",
 			source_name="T-15",
 			enqueue_after_commit=True,
@@ -682,3 +685,163 @@ class TestNotifyStep(unittest.TestCase):
 		)["name"]
 		row = next(r for r in api.get_automations(search=AUTO_TITLE)["items"] if r["name"] == name)
 		self.assertEqual(row["channels"], ["SMS", "Notify"])
+
+	@patch(PUSH_PATH)
+	@patch(IN_APP_PATH)
+	def test_restricted_jinja_blocks_dangerous_templates(self, mock_in_app, mock_push):
+		u1 = _ensure_user("jinja_sec", enabled=1)
+		doc = _make_todo(description="Safe desc")
+		dangerous = [
+			"{{ frappe.db.sql('select email from tabUser where name=\"Administrator\"') }}",
+			"{{ frappe.get_doc('User', 'Administrator').email }}",
+			"{{ frappe.get_all('User', pluck='name') }}",
+			"{{ doc.__class__ }}",
+			"{{ frappe.sendmail() }}",
+			"{{ frappe.sendmail }}",
+			"{{ frappe.make_post_request('https://evil.example') }}",
+			"{{ frappe.make_post_request }}",
+		]
+		for idx, tpl in enumerate(dangerous):
+			with self.subTest(tpl=tpl):
+				step = _step(
+					notify_users=json.dumps([u1]),
+					notify_title=tpl,
+					notify_body="safe body",
+				)
+				ctx = _ctx(step, doc, value=f"v-sec-{idx}")
+				res = steps.execute(ctx, step)
+				self.assertEqual(res.outcome_status, STEP_STATUS_ERROR)
+				self.assertNotIn("Traceback", res.reason or "")
+				self.assertNotIn("Administrator", res.reason or "")
+
+				# Also verify in body position nothing sensitive is ever rendered
+				body_step = _step(notify_users=json.dumps([u1]), notify_title="Safe", notify_body=tpl)
+				try:
+					rendered = notify.render_notify(body_step, doc)
+				except frappe.ValidationError as err:
+					self.assertNotIn("Traceback", str(err))
+				else:
+					self.assertEqual(rendered["body"], "")
+		mock_in_app.assert_not_called()
+		mock_push.assert_not_called()
+
+	def test_restricted_jinja_allows_normal_fields_and_safe_helpers(self):
+		doc = _make_todo(description="Normal desc")
+		step = _step(
+			notify_title="{{ doc.description }} {{ frappe.format_value(5) }}",
+			notify_body="{{ doc.creation }}|[{{ doc.missing_field_xyz }}]",
+		)
+		rendered = notify.render_notify(step, doc)
+		self.assertEqual(rendered["title"], "Normal desc 5")
+		self.assertTrue(rendered["body"].startswith(str(doc.creation)))
+		self.assertTrue(rendered["body"].endswith("|[]"))
+
+	def test_render_notify_sanitizes_route(self):
+		doc = frappe._dict(doctype="ToDo", name="T-ROUTE")
+		cases = [
+			("/tasks", "/tasks"),
+			("/inbox/conv/ABC?x=1#y", "/inbox/conv/ABC?x=1#y"),
+			("", NOTIFY_DEFAULT_ROUTE),
+			("javascript:alert(1)", NOTIFY_DEFAULT_ROUTE),
+			("https://evil.example", NOTIFY_DEFAULT_ROUTE),
+			("//evil.example", NOTIFY_DEFAULT_ROUTE),
+			("/\\\\evil", NOTIFY_DEFAULT_ROUTE),
+			("/a\nb", NOTIFY_DEFAULT_ROUTE),
+			(" /tasks", NOTIFY_DEFAULT_ROUTE),
+			("tasks", NOTIFY_DEFAULT_ROUTE),
+		]
+		for raw_route, expected in cases:
+			with self.subTest(raw_route=raw_route):
+				step = _step(notify_route=raw_route)
+				rendered = notify.render_notify(step, doc)
+				self.assertEqual(rendered["route"], expected)
+
+	@patch(PUSH_PATH)
+	@patch(IN_APP_PATH)
+	def test_run_automation_marks_run_failed_on_notify_step_error(self, mock_in_app, mock_push):
+		u1 = _ensure_user("run_err_user", enabled=1)
+		todo = _make_todo(owner=u1)
+
+		empty_auto = _make_automation(
+			[dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="{{ doc.missing_title_field }}"))],
+			[("t1", "", "n1")],
+		)
+		run_id = executor.run_automation(empty_auto, "t1", "ToDo", todo.name)
+		self.assertIsNotNone(run_id)
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run_id, "status"), RUN_STATUS_FAILED)
+		log = json.loads(frappe.db.get_value(RUN_DOCTYPE, run_id, "log"))
+		n1_entry = next(e for e in log if e["step_id"] == "n1")
+		self.assertEqual(n1_entry.get("outcome_status"), STEP_STATUS_ERROR)
+		self.assertEqual(n1_entry.get("error"), NOTIFY_ERROR_EMPTY_TITLE)
+		self.assertEqual(api.get_runs(empty_auto)[0]["error"], NOTIFY_ERROR_EMPTY_TITLE)
+
+		bad_jinja_auto = _make_automation(
+			[dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="Broken {{ doc.name"))],
+			[("t1", "", "n1")],
+		)
+		bad_run_id = executor.run_automation(bad_jinja_auto, "t1", "ToDo", todo.name)
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, bad_run_id, "status"), RUN_STATUS_FAILED)
+		bad_log = json.loads(frappe.db.get_value(RUN_DOCTYPE, bad_run_id, "log"))
+		bad_entry = next(e for e in bad_log if e["step_id"] == "n1")
+		self.assertEqual(bad_entry.get("outcome_status"), STEP_STATUS_ERROR)
+		self.assertIn("template", bad_entry.get("error", "").lower())
+		self.assertNotIn("Traceback", bad_entry.get("error", ""))
+
+		mock_in_app.assert_not_called()
+		mock_push.assert_not_called()
+
+	@patch(PUSH_PATH, return_value=["PNL-OK"])
+	@patch(IN_APP_PATH)
+	def test_run_automation_completes_on_valid_notify_step(self, mock_in_app, mock_push):
+		u1 = _ensure_user("run_ok_user", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[dict(_step(step_id="n1", notify_users=json.dumps([u1]), notify_title="Hello {{ doc.name }}"))],
+			[("t1", "", "n1")],
+		)
+		run_id = executor.run_automation(auto_name, "t1", "ToDo", todo.name)
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run_id, "status"), RUN_STATUS_COMPLETED)
+		mock_in_app.assert_called_once()
+		mock_push.assert_called_once()
+
+	@patch(PUSH_PATH, return_value=["PNL-KEY"])
+	@patch(IN_APP_PATH)
+	def test_push_idempotency_key_unique_per_run(self, mock_in_app, mock_push):
+		u1 = _ensure_user("idem_user", enabled=1)
+		step = _step(notify_push=1, notify_in_app=0, notify_users=json.dumps([u1]))
+		doc = frappe._dict(doctype="ToDo", name="T-KEY", description="d")
+
+		ctx_r1 = _ctx(step, doc, value="")
+		ctx_r1["run"] = "RUN-001"
+		ctx_r1_again = _ctx(step, doc, value="")
+		ctx_r1_again["run"] = "RUN-001"
+		ctx_r2 = _ctx(step, doc, value="")
+		ctx_r2["run"] = "RUN-002"
+
+		notify.send_notification(ctx_r1, step)
+		notify.send_notification(ctx_r1_again, step)
+		notify.send_notification(ctx_r2, step)
+
+		keys = [c.kwargs["idempotency_key"] for c in mock_push.call_args_list]
+		self.assertEqual(len(keys), 3)
+		self.assertEqual(keys[0], keys[1])
+		self.assertNotEqual(keys[0], keys[2])
+		self.assertIn(":RUN-001:", keys[0])
+		self.assertIn(":RUN-002:", keys[2])
+
+	def test_field_mode_drops_disabled_users_keeps_non_user_emails(self):
+		u_on = _ensure_user("field_on", enabled=1)
+		u_off = _ensure_user("field_off", enabled=0)
+		non_user = "external_only@outside.invalid"
+		step = _step(notify_mode=NOTIFY_MODE_FIELD, notify_field="custom_recipients")
+		doc = frappe._dict(
+			doctype="ToDo",
+			name="T-FIELD-DIS",
+			custom_recipients=f"{u_on}, {u_off}, {non_user}",
+		)
+		self.assertEqual(notify.resolve_notify_recipients(step, doc), [u_on, non_user])
+
+	def test_notify_mode_default_is_role(self):
+		df = frappe.get_meta("Automation Step").get_field("notify_mode")
+		self.assertIsNotNone(df)
+		self.assertEqual(df.default, NOTIFY_MODE_ROLE)

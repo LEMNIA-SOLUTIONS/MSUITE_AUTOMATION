@@ -21,15 +21,18 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 - **Send-to field types**: WhatsApp, SMS and Add to List need a Phone field, Send Email needs an Email field; a blank Update Field value is rejected when the target field is mandatory.
 - **Send Notification (Notify) step**:
   - **Step type**: `Send Notification` (shown as **Notify** in the builder and `get_automations` `channels` chip).
-  - **Fields** (`Automation Step`): `notify_push` (Check, default 1), `notify_in_app` (Check, default 1), `notify_mode` (Select), `notify_role` (Link `Role`), `notify_users` (Code JSON list of user IDs), `notify_field` (Data), `notify_title` (Data, Jinja, truncated to 140 chars), `notify_body` (Small Text, Jinja), `notify_category` (Select), `notify_priority` (`high` / `normal`), `notify_route` (Data, Jinja, defaults to `/`).
+  - **Fields** (`Automation Step`): `notify_push` (Check, default 1), `notify_in_app` (Check, default 1), `notify_mode` (Select, default `Role`), `notify_role` (Link `Role`), `notify_users` (Code JSON list of user IDs), `notify_field` (Data), `notify_title` (Data, Jinja, truncated to 140 chars), `notify_body` (Small Text, Jinja), `notify_category` (Select), `notify_priority` (`high` / `normal`), `notify_route` (Data, Jinja, sanitized via `msuite_core.services.notifications.sanitize_route`, defaults to `/`).
+  - **Template & route safety**: Notification Jinja templates render with `get_jenv(restrict_globals=True)` and a minimal safe helper subset (blocking `frappe.db.sql`, `frappe.get_doc`, `frappe.get_all`, `frappe.sendmail`, `frappe.make_post_request`, and `.__` attribute access; blocked templates fail the step with a readable error). Rendered routes are sanitized so non-relative URLs, `//...`, `javascript:`, backslashes, and control characters fall back to `/`.
   - **Recipient modes** (the five modes):
     - `Role`: enabled users holding `notify_role` (`Has Role`).
     - `Specific Users`: enabled users listed in `notify_users` (JSON list).
     - `Record Owner`: `doc.owner` (if enabled user).
     - `Assignee`: users with `Open` `ToDo` assignments on the record (if enabled users).
-    - `Field on Record`: comma/semicolon-separated values from `notify_field` (checked on every reaching DocType). Non-User email identifiers are kept for push-only delivery; in-app bell rows still require enabled `User` accounts. Blank values and `Guest` are dropped in all modes.
+    - `Field on Record`: comma/semicolon-separated values from `notify_field` (checked on every reaching DocType). Disabled `User` accounts (`enabled=0`) are dropped, while non-User email identifiers are kept for push-only delivery; in-app bell rows still require enabled `User` accounts. Blank values and `Guest` are dropped in all modes.
   - **Categories**: `General` (default), `Academic`, `Billing`, `Marketing`, `System`.
-  - **Skip reasons & error handling**:
+  - **Idempotency & error handling**:
+    - Push idempotency keys include the run name (`<dedupe_base>:<run>:<recipient>`), so separate saves/runs of the same record do not collide inside `msuite_notification`'s claim window.
+    - Step errors (`step_error`, i.e. `outcome_status == "error"`, such as empty rendered title, invalid/blocked Jinja, or no channel selected) mark the `Messaging Automation Run` as `Failed` with the error text recorded on the log entry and surfaced in `get_runs`.
     - `no recipient`: no recipient resolved after filtering.
     - `push unavailable`: push-only step when `msuite_notification` is not installed or `Push Notification Config` is disabled/suppressed.
     - `duplicate`: deduplication lock already held for this run/step/record.
