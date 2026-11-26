@@ -725,6 +725,50 @@ class TestNotifyStep(unittest.TestCase):
 		mock_in_app.assert_not_called()
 		mock_push.assert_not_called()
 
+	def test_jinja_cannot_reach_other_records_or_document_methods(self):
+		"""Round-2 review: frappe.utils helpers, extra Frappe globals and live Document methods must stay unreachable."""
+		todo = frappe.get_doc("ToDo", _make_todo(description="Safe desc").name)
+		vectors = [
+			"{{ frappe.utils.get_user_info_for_avatar('Administrator') }}",
+			"{{ frappe.utils.formatdate('2026-01-02') }}",
+			"{{ doc.db_get('owner') }}",
+			"{{ doc.get_db_value('owner') }}",
+			"{{ doc.reload() }}",
+			"{{ doc.as_dict().owner }}",
+			"{{ doc|attr('db_get')('owner') }}",
+			"{{ doc.db_set('description', 'MUTATED') }}",
+			"{{ web_blocks }}{{ get_toc }}{{ get_serial_or_batch_nos }}",
+		]
+		for tpl in vectors:
+			with self.subTest(tpl=tpl):
+				step = _step(notify_title=tpl, notify_body="b")
+				try:
+					title = notify.render_notify(step, todo)["title"]
+				except frappe.ValidationError as err:
+					self.assertNotIn("Traceback", str(err))
+				else:
+					self.assertNotIn("Administrator", title)
+					self.assertNotIn("@", title)
+					self.assertEqual(title, "")
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "description"), "Safe desc")
+
+	def test_field_mode_matches_user_names_case_insensitively(self):
+		"""A record field holding 'Alice@X.com' must reach the user 'alice@x.com' and honour enabled/disabled."""
+		on = _ensure_user("case_on", enabled=1)
+		off = _ensure_user("case_off", enabled=0)
+		doc = frappe._dict(doctype="ToDo", name="X", owner="Administrator", mixed=f"{on.upper()};{off.upper()}")
+		step = _step(notify_mode=NOTIFY_MODE_FIELD, notify_field="mixed")
+		self.assertEqual(notify.resolve_notify_recipients(step, doc), [on.upper()])
+		role_users = notify._users_by_enabled([on.upper(), off.upper()], 1)
+		self.assertEqual(role_users, {on.lower()})
+
+	def test_jinja_snapshot_still_renders_record_fields_and_filters(self):
+		todo = frappe.get_doc("ToDo", _make_todo(description="Safe desc").name)
+		step = _step(notify_title="{{ doc.description|upper }} {{ doc.creation.strftime('%Y') }}", notify_body="{{ range(2)|list }} {{ _('Hello') }}")
+		rendered = notify.render_notify(step, todo)
+		self.assertEqual(rendered["title"], f"SAFE DESC {todo.creation.strftime('%Y')}")
+		self.assertEqual(rendered["body"], "[0, 1] Hello")
+
 	def test_restricted_jinja_allows_normal_fields_and_safe_helpers(self):
 		doc = _make_todo(description="Normal desc")
 		step = _step(

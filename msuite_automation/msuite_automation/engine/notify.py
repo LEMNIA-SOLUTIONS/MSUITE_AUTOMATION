@@ -46,8 +46,10 @@ _SAFE_FRAPPE_HELPERS = (
 	"number_format",
 	"sanitize_html",
 	"time_format",
-	"utils",
 )
+# Jinja built-ins plus the translation helpers; every other global Frappe or an installed app adds to the
+# environment (web_blocks, get_toc, app hooks such as ERPNext batch helpers) is dropped from Notify templates.
+_SAFE_JINJA_GLOBALS = frozenset({"_", "gettext", "ngettext", "pgettext", "npgettext"})
 
 
 def _clean_dedupe(candidates: list) -> list[str]:
@@ -86,7 +88,8 @@ def _users_by_enabled(candidates: list[str], enabled: int) -> set[str]:
 		enabled: Expected ``User.enabled`` flag (1 for enabled, 0 for disabled).
 
 	Returns:
-		set[str]: Matching User document names.
+		set[str]: Matching User document names, lower-cased (the database matches names case-insensitively,
+			so callers compare ``recipient.lower()`` against this set).
 
 	Raises:
 		None.
@@ -96,13 +99,14 @@ def _users_by_enabled(candidates: list[str], enabled: int) -> set[str]:
 	"""
 	if not candidates:
 		return set()
-	return set(
-		frappe.get_all(
+	return {
+		name.lower()
+		for name in frappe.get_all(
 			"User",
 			filters={"name": ["in", candidates], "enabled": enabled},
 			pluck="name",
 		)
-	)
+	}
 
 
 def parse_notify_users(raw) -> list:
@@ -195,10 +199,10 @@ def resolve_notify_recipients(step, doc) -> list[str]:
 		return cleaned
 	if mode == NOTIFY_MODE_FIELD:
 		disabled = _users_by_enabled(cleaned, 0)
-		return [recipient for recipient in cleaned if recipient not in disabled]
+		return [recipient for recipient in cleaned if recipient.lower() not in disabled]
 
 	enabled = _users_by_enabled(cleaned, 1)
-	return [recipient for recipient in cleaned if recipient in enabled]
+	return [recipient for recipient in cleaned if recipient.lower() in enabled]
 
 
 def _render_template_field(raw: str | None, context: dict, field_label: str) -> str:
@@ -230,11 +234,12 @@ def _render_template_field(raw: str | None, context: dict, field_label: str) -> 
 		raise frappe.ValidationError(NOTIFY_ERROR_INVALID_TEMPLATE.format(field_label, "Illegal template"))
 	try:
 		from jinja2 import Undefined
+		from jinja2.defaults import DEFAULT_NAMESPACE
 		from frappe.utils.jinja import get_jenv, safe_render_flags
 
 		base_jenv = get_jenv(restrict_globals=True)
 		jenv = base_jenv.overlay(undefined=Undefined, finalize=lambda v: "" if v is None else v)
-		jenv.globals = base_jenv.globals.copy()
+		jenv.globals = {k: v for k, v in base_jenv.globals.items() if k in DEFAULT_NAMESPACE or k in _SAFE_JINJA_GLOBALS}
 		frappe_ns = base_jenv.globals.get("frappe") or {}
 		jenv.globals["frappe"] = {k: frappe_ns[k] for k in _SAFE_FRAPPE_HELPERS if k in frappe_ns}
 		compiled = jenv.from_string(text)
@@ -263,7 +268,8 @@ def render_notify(step, doc) -> dict:
 	Side Effects:
 		None.
 	"""
-	context = {"doc": doc}
+	# A plain snapshot, not the live Document: templates cannot call methods that re-read the database.
+	context = {"doc": doc.as_dict() if callable(getattr(doc, "as_dict", None)) else doc}  # frappe._dict answers None for unknown attrs
 	title = _render_template_field(g(step, "notify_title"), context, "title")[:NOTIFY_TITLE_MAX]
 	body = _render_template_field(g(step, "notify_body"), context, "body")
 	route = sanitize_route(
@@ -344,7 +350,7 @@ def send_notification(ctx, step) -> StepOutcome:
 		delivered = False
 		# ponytail: one Log + one job per user; add a cap/batch only if a role grows past a few hundred
 		for recipient in recipients:
-			if use_in_app and recipient in enabled_users:
+			if use_in_app and recipient.lower() in enabled_users:
 				create_notification_log(
 					recipient=recipient,
 					subject=title,
