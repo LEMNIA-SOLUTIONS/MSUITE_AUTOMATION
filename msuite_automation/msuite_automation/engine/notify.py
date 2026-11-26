@@ -370,7 +370,13 @@ def send_notification(ctx, step) -> StepOutcome:
 				f"Notify step {g(step, 'step_id')}: {over_cap} recipient(s) over cap ({NOTIFY_MAX_RECIPIENTS}) skipped"
 			)
 
-		enabled_users = _users_by_enabled(recipients, 1) if use_in_app else set()
+		# Every mode except Field on Record already returned enabled Users only, so skip the second lookup.
+		if not use_in_app:
+			enabled_users = set()
+		elif g(step, "notify_mode") == NOTIFY_MODE_FIELD:
+			enabled_users = _users_by_enabled(recipients, 1)
+		else:
+			enabled_users = {recipient.lower() for recipient in recipients}
 		push_fn = None
 		if use_push and NOTIFY_APP in (frappe.get_installed_apps() or []):
 			from msuite_notification.services.queue import enqueue_push
@@ -408,21 +414,21 @@ def send_notification(ctx, step) -> StepOutcome:
 					)
 				except Exception as err:
 					if first_push_error is None:
-						first_push_error = str(err) or err.__class__.__name__
+						first_push_error = (str(err) or err.__class__.__name__)[:RUN_ERROR_MAX]
 					frappe.log_error(title=NOTIFY_PUSH_ERROR_LOG_TITLE, message=frappe.get_traceback())
 				else:
 					delivered = delivered or bool(log_names)
 
 		if delivered:
 			return True
-		if not use_in_app and use_push and first_push_error is None:
+		if not use_in_app and use_push:
 			skip_reason = SKIP_REASON_PUSH_UNAVAILABLE
 		return False
 
 	outcome = _send(ctx, step, NOTIFY_CHANNEL_KEY, _deliver)
 	if outcome == RESULT_SKIPPED_NO_RECIPIENT:
 		if first_push_error is not None:
-			return step_error(NOTIFY_ERROR_PUSH_FAILED.format(first_push_error[:RUN_ERROR_MAX]))
+			return step_error(NOTIFY_ERROR_PUSH_FAILED.format(first_push_error))
 		if skip_reason:
 			return step_skipped(skip_reason)
 	return outcome
