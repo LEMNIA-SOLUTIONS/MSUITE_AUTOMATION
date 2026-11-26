@@ -17,7 +17,9 @@ from msuite_automation.msuite_automation.constants import (
 	NOTIFY_ERROR_EMPTY_TITLE,
 	NOTIFY_ERROR_INVALID_TEMPLATE,
 	NOTIFY_ERROR_NO_CHANNEL,
+	NOTIFY_ERROR_PUSH_FAILED,
 	NOTIFY_GUEST_USER,
+	NOTIFY_MAX_RECIPIENTS,
 	NOTIFY_MODE_ASSIGNEE,
 	NOTIFY_MODE_FIELD,
 	NOTIFY_MODE_RECORD_OWNER,
@@ -27,6 +29,7 @@ from msuite_automation.msuite_automation.constants import (
 	NOTIFY_TITLE_MAX,
 	RESULT_SKIPPED_ALREADY_SENT,
 	RESULT_SKIPPED_NO_RECIPIENT,
+	RUN_ERROR_MAX,
 	SKIP_REASON_PUSH_UNAVAILABLE,
 	StepOutcome,
 	step_error,
@@ -288,11 +291,16 @@ def send_notification(ctx, step) -> StepOutcome:
 	step deduplication lock via ``steps._send`` so duplicate runs and retries do
 	not double-send, and scopes push idempotency keys by ``ctx.run``
 	(``f"{dedupe_base}:{run_id}:{recipient}"``) so separate runs on the same record
-	do not collide. Missing ``msuite_notification`` app or disabled Push
-	Notification Config does not fail the step: in-app still runs, and push-only
-	steps skip with SKIP_REASON_PUSH_UNAVAILABLE. Per-recipient push enqueue
-	exceptions are logged via ``frappe.log_error`` without failing the run or
-	stopping delivery to remaining recipients.
+	do not collide. Serves at most ``NOTIFY_MAX_RECIPIENTS`` de-duplicated recipients,
+	recording any truncated count in ``ctx.entry["over_cap"]`` and logging a warning.
+	Missing ``msuite_notification`` app or disabled Push Notification Config
+	(``enqueue_push`` returning ``[]`` without raising) skips push-only steps with
+	``SKIP_REASON_PUSH_UNAVAILABLE``. Per-recipient push enqueue exceptions are
+	logged via ``frappe.log_error`` without stopping delivery to remaining recipients;
+	if any channel delivers (e.g. an in-app bell row or another push), the step is
+	``sent``, whereas if push raised and nothing was delivered on any channel, the
+	step returns ``step_error(NOTIFY_ERROR_PUSH_FAILED.format(...))`` and releases the
+	lock so the failed run can be retried.
 
 	Args:
 		ctx: Automation execution context containing automation, doc, value,
@@ -307,8 +315,10 @@ def send_notification(ctx, step) -> StepOutcome:
 		channels.SendRetry: Propagated from ``steps._send`` when lock guard is unavailable.
 
 	Side Effects:
-		Acquires/releases deduplication cache locks, inserts Notification Log rows and publishes
-		realtime events (in-app), and enqueues Push Notification Log jobs (push).
+		Acquires/releases deduplication cache locks, mutates ``ctx.entry["over_cap"]``
+		when recipients exceed ``NOTIFY_MAX_RECIPIENTS``, inserts Notification Log rows
+		and publishes realtime events (in-app), logs warnings/errors, and enqueues
+		Push Notification Log jobs (push).
 	"""
 	if g(step, "step_id") in (ctx.get("already_sent_nodes") or ()):
 		return RESULT_SKIPPED_ALREADY_SENT
@@ -340,12 +350,25 @@ def send_notification(ctx, step) -> StepOutcome:
 	dedupe_base = _dedupe_key(ctx, step, NOTIFY_CHANNEL_KEY)
 	run_id = ctx.get("run") or ""
 	skip_reason: str | None = None
+	first_push_error: str | None = None
 
 	def _deliver() -> bool:
-		nonlocal skip_reason
+		"""Deliver across enabled channels for up to NOTIFY_MAX_RECIPIENTS, tracking push failures."""
+		nonlocal skip_reason, first_push_error
 		recipients = resolve_notify_recipients(step, doc)
 		if not recipients:
 			return False
+
+		# ponytail: real batching when Role mode returns to the UI
+		if len(recipients) > NOTIFY_MAX_RECIPIENTS:
+			over_cap = len(recipients) - NOTIFY_MAX_RECIPIENTS
+			recipients = recipients[:NOTIFY_MAX_RECIPIENTS]
+			entry = getattr(ctx, "entry", None)
+			if isinstance(entry, dict):
+				entry["over_cap"] = over_cap
+			frappe.logger("msuite_automation").warning(
+				f"Notify step {g(step, 'step_id')}: {over_cap} recipient(s) over cap ({NOTIFY_MAX_RECIPIENTS}) skipped"
+			)
 
 		enabled_users = _users_by_enabled(recipients, 1) if use_in_app else set()
 		push_fn = None
@@ -355,7 +378,6 @@ def send_notification(ctx, step) -> StepOutcome:
 			push_fn = enqueue_push
 
 		delivered = False
-		# ponytail: one Log + one job per user; add a cap/batch only if a role grows past a few hundred
 		for recipient in recipients:
 			if use_in_app and recipient.lower() in enabled_users:
 				create_notification_log(
@@ -384,18 +406,23 @@ def send_notification(ctx, step) -> StepOutcome:
 						source_name=docname,
 						enqueue_after_commit=True,
 					)
-				except Exception:
+				except Exception as err:
+					if first_push_error is None:
+						first_push_error = str(err) or err.__class__.__name__
 					frappe.log_error(title=NOTIFY_PUSH_ERROR_LOG_TITLE, message=frappe.get_traceback())
 				else:
 					delivered = delivered or bool(log_names)
 
 		if delivered:
 			return True
-		if not use_in_app and use_push:
+		if not use_in_app and use_push and first_push_error is None:
 			skip_reason = SKIP_REASON_PUSH_UNAVAILABLE
 		return False
 
 	outcome = _send(ctx, step, NOTIFY_CHANNEL_KEY, _deliver)
-	if outcome == RESULT_SKIPPED_NO_RECIPIENT and skip_reason:
-		return step_skipped(skip_reason)
+	if outcome == RESULT_SKIPPED_NO_RECIPIENT:
+		if first_push_error is not None:
+			return step_error(NOTIFY_ERROR_PUSH_FAILED.format(first_push_error[:RUN_ERROR_MAX]))
+		if skip_reason:
+			return step_skipped(skip_reason)
 	return outcome

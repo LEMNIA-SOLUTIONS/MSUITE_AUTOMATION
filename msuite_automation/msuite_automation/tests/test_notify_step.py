@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import frappe
 
+from msuite_automation.msuite_automation import constants
 from msuite_automation.msuite_automation.api import automations as api
 from msuite_automation.msuite_automation.constants import (
 	NOTIFY_APP,
@@ -24,6 +25,7 @@ from msuite_automation.msuite_automation.constants import (
 	RESULT_SKIPPED_NO_RECIPIENT,
 	RESULT_SKIPPED_PUSH_UNAVAILABLE,
 	RUN_DOCTYPE,
+	RUN_ERROR_MAX,
 	RUN_STATUS_COMPLETED,
 	RUN_STATUS_FAILED,
 	SEND_NOTIFICATION,
@@ -1068,3 +1070,224 @@ class TestNotifyStep(unittest.TestCase):
 		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run2, "status"), RUN_STATUS_COMPLETED)
 		self.assertEqual(frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": todo.name}), 2)
 		self.assertEqual(mock_push.call_count, 2)
+
+	@patch("frappe.log_error")
+	@patch(PUSH_PATH, side_effect=[RuntimeError("first boom"), RuntimeError("second boom")])
+	@patch(IN_APP_PATH)
+	def test_push_only_all_enqueue_errors_is_step_error(self, mock_in_app, mock_push, mock_log_error):
+		u1 = _ensure_user("push_fail_1", enabled=1)
+		u2 = _ensure_user("push_fail_2", enabled=1)
+		step = _step(
+			notify_push=1,
+			notify_in_app=0,
+			notify_users=json.dumps([u1, u2]),
+			notify_title="Push fail {{ doc.name }}",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-PUSH-ERR", description="d")
+		ctx = _ctx(step, doc, value="v-push-all-err")
+		key = self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res.outcome_status, STEP_STATUS_ERROR)
+		self.assertEqual(res.reason, constants.NOTIFY_ERROR_PUSH_FAILED.format("first boom"))
+		self.assertEqual(mock_push.call_count, 2)
+		self.assertEqual(mock_log_error.call_count, 2)
+		mock_in_app.assert_not_called()
+
+		# Lock was released on error, so a subsequent retry is not blocked as duplicate.
+		with patch(PUSH_PATH, return_value=["PNL-RECOVER"]):
+			retry_res = steps.execute(ctx, step)
+		self.assertEqual(retry_res, RESULT_SENT)
+		self.assertFalse(channels.acquire_lock(key))
+
+		# First push exception message is bounded by RUN_ERROR_MAX.
+		long_msg = "E" * (RUN_ERROR_MAX + 80)
+		step_long = _step(notify_push=1, notify_in_app=0, notify_users=json.dumps([u1]))
+		ctx_long = _ctx(step_long, doc, value="v-push-long-err")
+		self._track_lock(ctx_long, step_long)
+		with patch(PUSH_PATH, side_effect=RuntimeError(long_msg)):
+			long_res = steps.execute(ctx_long, step_long)
+		self.assertEqual(long_res.outcome_status, STEP_STATUS_ERROR)
+		self.assertEqual(long_res.reason, constants.NOTIFY_ERROR_PUSH_FAILED.format("E" * RUN_ERROR_MAX))
+
+	@patch("frappe.enqueue")
+	@patch("frappe.log_error")
+	@patch(PUSH_PATH, side_effect=RuntimeError("FCM down"))
+	@patch(IN_APP_PATH)
+	def test_push_only_run_ends_failed_with_reason(self, mock_in_app, mock_push, _mock_log_error, _mock_enqueue):
+		frappe.set_user("Administrator")
+		u1 = _ensure_user("push_run_fail", enabled=1)
+		todo = _make_todo(owner=u1)
+		auto_name = _make_automation(
+			[dict(_step(step_id="n1", notify_push=1, notify_in_app=0, notify_users=json.dumps([u1]), notify_title="Push {{ doc.name }}"))],
+			[("t1", "", "n1")],
+		)
+
+		run_id = executor.run_automation(auto_name, "t1", "ToDo", todo.name)
+		self.assertEqual(frappe.db.get_value(RUN_DOCTYPE, run_id, "status"), RUN_STATUS_FAILED)
+		log = json.loads(frappe.db.get_value(RUN_DOCTYPE, run_id, "log"))
+		n1_entry = next(e for e in log if e["step_id"] == "n1")
+		expected_err = constants.NOTIFY_ERROR_PUSH_FAILED.format("FCM down")
+		self.assertEqual(n1_entry.get(STEP_OUTCOME_KEY), STEP_STATUS_ERROR)
+		self.assertEqual(n1_entry.get("error"), expected_err)
+		self.assertEqual(api.get_runs(auto_name)[0]["error"], expected_err)
+		mock_in_app.assert_not_called()
+
+		# Because the step errored (did not send), retrying the failed run re-attempts push.
+		res = api.retry_run(run_id)
+		with patch(PUSH_PATH, return_value=["PNL-RETRY-OK"]) as mock_retry_push:
+			executor.deliver_outbox(res["name"])
+		mock_retry_push.assert_called_once()
+		runs = frappe.get_all(RUN_DOCTYPE, filters={"automation": auto_name, "name": ("!=", run_id)}, fields=["status"])
+		self.assertEqual(runs[0].status, RUN_STATUS_COMPLETED)
+
+	@patch(PUSH_PATH, return_value=[])
+	@patch(IN_APP_PATH)
+	def test_push_disabled_still_skipped_push_unavailable(self, mock_in_app, mock_push):
+		u1 = _ensure_user("push_unavail", enabled=1)
+		step = _step(notify_push=1, notify_in_app=0, notify_users=json.dumps([u1]))
+		doc = frappe._dict(doctype="ToDo", name="T-UNAVAIL", description="d")
+		ctx = _ctx(step, doc, value="v-unavail")
+		self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SKIPPED_PUSH_UNAVAILABLE)
+		self.assertEqual(res.outcome_status, STEP_STATUS_SKIPPED)
+		self.assertEqual(res.reason, SKIP_REASON_PUSH_UNAVAILABLE)
+		mock_push.assert_called_once()
+		mock_in_app.assert_not_called()
+
+		apps_without_notify = [app for app in frappe.get_installed_apps() if app != NOTIFY_APP]
+		ctx_missing = _ctx(step, doc, value="v-no-app")
+		self._track_lock(ctx_missing, step)
+		with patch("frappe.get_installed_apps", return_value=apps_without_notify):
+			res_missing = steps.execute(ctx_missing, step)
+		self.assertEqual(res_missing, RESULT_SKIPPED_PUSH_UNAVAILABLE)
+
+	@patch("frappe.log_error")
+	@patch("frappe.publish_realtime")
+	@patch(PUSH_PATH, side_effect=RuntimeError("push down"))
+	def test_both_channels_push_raises_still_sent(self, mock_push, _mock_realtime, mock_log_error):
+		u1 = _ensure_user("both_push_err", enabled=1)
+		step = _step(
+			notify_push=1,
+			notify_in_app=1,
+			notify_users=json.dumps([u1]),
+			notify_title="ZZ notify both err {{ doc.name }}",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-BOTH-ERR", description="d")
+		ctx = _ctx(step, doc, value="v-both-err")
+		self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SENT)
+		self.assertEqual(res.outcome_status, STEP_STATUS_SENT)
+		mock_push.assert_called_once()
+		mock_log_error.assert_called_once()
+		self.assertEqual(
+			frappe.db.count("Notification Log", {"for_user": u1, "document_type": "ToDo", "document_name": "T-BOTH-ERR"}),
+			1,
+		)
+
+	@patch("frappe.log_error")
+	@patch(PUSH_PATH, side_effect=[RuntimeError("first failed"), ["PNL-2"]])
+	@patch(IN_APP_PATH)
+	def test_first_push_raises_second_ok_is_sent(self, mock_in_app, mock_push, mock_log_error):
+		u1 = _ensure_user("push_partial_1", enabled=1)
+		u2 = _ensure_user("push_partial_2", enabled=1)
+		step = _step(
+			notify_push=1,
+			notify_in_app=0,
+			notify_users=json.dumps([u1, u2]),
+			notify_title="Partial {{ doc.name }}",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-PARTIAL", description="d")
+		ctx = _ctx(step, doc, value="v-partial")
+		self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SENT)
+		self.assertEqual(res.outcome_status, STEP_STATUS_SENT)
+		self.assertEqual(mock_push.call_count, 2)
+		mock_log_error.assert_called_once()
+		mock_in_app.assert_not_called()
+
+	def test_recipient_cap_boundaries(self):
+		cap = constants.NOTIFY_MAX_RECIPIENTS
+		cases = (
+			(cap - 1, cap - 1, None),
+			(cap, cap, None),
+			(cap + 1, cap, 1),
+		)
+		for total, expected_calls, expected_over_cap in cases:
+			with self.subTest(total=total):
+				synthetic = [f"u{i}@synthetic.invalid" for i in range(total)]
+				step = _step(notify_push=1, notify_in_app=0, notify_title="Cap {{ doc.name }}")
+				doc = frappe._dict(doctype="ToDo", name=f"T-CAP-{total}", description="d")
+				ctx = _ctx(step, doc, value=f"v-cap-{total}")
+				self._track_lock(ctx, step)
+
+				with (
+					patch.object(notify, "resolve_notify_recipients", return_value=synthetic),
+					patch(PUSH_PATH, return_value=["PNL-CAP"]) as mock_push,
+					patch("frappe.logger") as mock_logger,
+				):
+					res = steps.execute(ctx, step)
+
+				self.assertEqual(res, RESULT_SENT)
+				self.assertEqual(mock_push.call_count, expected_calls)
+				self.assertEqual([c.kwargs["recipient"] for c in mock_push.call_args_list], synthetic[:expected_calls])
+				if expected_over_cap is None:
+					self.assertNotIn("over_cap", ctx.entry)
+					mock_logger.return_value.warning.assert_not_called()
+				else:
+					self.assertEqual(ctx.entry.get("over_cap"), expected_over_cap)
+					mock_logger.assert_called_with("msuite_automation")
+					mock_logger.return_value.warning.assert_called_once()
+
+		# Guard when ctx.entry is None or absent on an over-cap run.
+		over_synthetic = [f"u{i}@synthetic.invalid" for i in range(cap + 2)]
+		for bad_entry_ctx in (
+			frappe._dict(automation=frappe._dict(name="MA-ZZ-CAP", send_frequency="Every time"), doc=frappe._dict(doctype="ToDo", name="T-NONE-ENTRY", description="d"), value="v-none", discriminator="", entry=None),
+			frappe._dict(automation=frappe._dict(name="MA-ZZ-CAP", send_frequency="Every time"), doc=frappe._dict(doctype="ToDo", name="T-NO-ENTRY", description="d"), value="v-absent", discriminator=""),
+		):
+			step = _step(notify_push=1, notify_in_app=0, notify_title="Cap {{ doc.name }}")
+			self._track_lock(bad_entry_ctx, step)
+			with (
+				patch.object(notify, "resolve_notify_recipients", return_value=over_synthetic),
+				patch(PUSH_PATH, return_value=["PNL-CAP"]) as mock_push,
+				patch("frappe.logger") as mock_logger,
+			):
+				res = notify.send_notification(bad_entry_ctx, step)
+			self.assertEqual(res, RESULT_SENT)
+			self.assertEqual(mock_push.call_count, cap)
+			mock_logger.return_value.warning.assert_called_once()
+
+	def test_cap_counts_after_dedupe(self):
+		cap = constants.NOTIFY_MAX_RECIPIENTS
+		unique_cap = [f"dedupe_{i}@synthetic.invalid" for i in range(cap)]
+		# 500 unique + 25 duplicates => 500 served, over_cap not set.
+		raw_at_cap = ", ".join(unique_cap + unique_cap[:25])
+		step = _step(notify_push=1, notify_in_app=0, notify_mode=NOTIFY_MODE_FIELD, notify_field="custom_recipients")
+		doc_at_cap = frappe._dict(doctype="ToDo", name="T-DEDUPE-CAP", description="d", custom_recipients=raw_at_cap)
+		ctx_at_cap = _ctx(step, doc_at_cap, value="v-dedupe-500")
+		self._track_lock(ctx_at_cap, step)
+
+		with patch(PUSH_PATH, return_value=["PNL-D1"]) as mock_push:
+			res1 = steps.execute(ctx_at_cap, step)
+		self.assertEqual(res1, RESULT_SENT)
+		self.assertEqual(mock_push.call_count, cap)
+		self.assertNotIn("over_cap", ctx_at_cap.entry)
+
+		# 501 unique + 25 duplicates => 500 served, over_cap == 1 (not 26).
+		unique_over = [*unique_cap, "dedupe_extra@synthetic.invalid"]
+		raw_over = ", ".join(unique_over + unique_over[:25])
+		doc_over = frappe._dict(doctype="ToDo", name="T-DEDUPE-OVER", description="d", custom_recipients=raw_over)
+		ctx_over = _ctx(step, doc_over, value="v-dedupe-501")
+		self._track_lock(ctx_over, step)
+
+		with patch(PUSH_PATH, return_value=["PNL-D2"]) as mock_push, patch("frappe.logger"):
+			res2 = steps.execute(ctx_over, step)
+		self.assertEqual(res2, RESULT_SENT)
+		self.assertEqual(mock_push.call_count, cap)
+		self.assertEqual(ctx_over.entry.get("over_cap"), 1)
