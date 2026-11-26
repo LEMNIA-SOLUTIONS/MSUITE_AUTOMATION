@@ -9,6 +9,7 @@ import re
 
 import frappe
 from frappe.core.doctype.server_script.server_script_utils import EVENT_MAP
+from frappe.utils import cint
 
 from msuite_core.constants import IG_CONSENT_POST_TYPE_DEFAULT, IG_CONSENT_POST_TYPE_MAP
 from msuite_automation.msuite_automation.constants import IG_CONSENT_DEFAULT_EXPIRY_DAYS
@@ -21,13 +22,17 @@ from msuite_automation.msuite_automation.constants import (
 	DOCSTATUS_SUBMITTED,
 	DOCUMENT_EVENT,
 	IF_ELSE,
+	NOTIFY_PREVIEW_CHANNEL_IN_APP,
+	NOTIFY_PREVIEW_CHANNEL_PUSH,
 	PREVIEW_ERROR_MAX,
 	SEND_EMAIL,
 	SEND_IG_CONSENT_TEMPLATE,
 	SEND_IG_PUBLIC_REPLY,
+	SEND_NOTIFICATION,
 	SEND_SMS,
 	SEND_WHATSAPP,
 	SCHEDULE,
+	SKIP_REASON_NO_RECIPIENT,
 	SUBMIT_EVENT_METHODS,
 	SUBMITTED_SAVE_EVENT_METHODS,
 	SWITCH,
@@ -38,7 +43,7 @@ from msuite_automation.msuite_automation.constants import (
 from msuite_automation.msuite_automation.engine import channels, steps as S
 from msuite_automation.msuite_automation.engine.executor import _already_ran, _passes, effective_automation, switch_handle, trigger_row
 from msuite_automation.msuite_automation.engine.filters import field_value, rule_ok
-from msuite_automation.msuite_automation.engine.graph import Graph
+from msuite_automation.msuite_automation.engine.graph import Graph, g
 from msuite_automation.msuite_automation.engine.triggers import TRIGGER_EVENT_MAP
 from msuite_automation.msuite_automation.engine.walker import advance, start_paths
 
@@ -262,6 +267,47 @@ def _render_or_error(text: str, ctx: dict) -> str:
 		return f"[Invalid template: {err}]"
 
 
+def _preview_notify(step, doc) -> dict:
+	"""Build dry-run preview payload for a Send Notification step without sending or writing.
+
+	Args:
+		step: Automation Step row or dict.
+		doc: Target document or dict.
+
+	Returns:
+		dict: ``{"channels": [...], "to": [...], "title": str, "body": str, "route": str}``
+			or ``{"skipped": "no recipient"}``.
+
+	Raises:
+		frappe.ValidationError: If any notification Jinja template is invalid
+			(caught by ``_dry_run`` and reported in ``row["error"]``).
+
+	Side Effects:
+		None. Read-only recipient queries; writes and sends nothing.
+	"""
+	from msuite_automation.msuite_automation.engine import notify
+
+	rendered = notify.render_notify(step, doc)
+	recipients = notify.resolve_notify_recipients(step, doc)
+	if not recipients:
+		return {"skipped": SKIP_REASON_NO_RECIPIENT}
+	channels_list = [
+		label
+		for flag, label in (
+			(cint(g(step, "notify_push", 0)), NOTIFY_PREVIEW_CHANNEL_PUSH),
+			(cint(g(step, "notify_in_app", 0)), NOTIFY_PREVIEW_CHANNEL_IN_APP),
+		)
+		if flag
+	]
+	return {
+		"channels": channels_list,
+		"to": recipients,
+		"title": rendered["title"],
+		"body": rendered["body"],
+		"route": rendered["route"],
+	}
+
+
 def _preview(automation, step, doc) -> dict:
 	eff = effective_automation(automation, step, doc.get("doctype"))
 	t = step.step_type
@@ -322,4 +368,6 @@ def _preview(automation, step, doc) -> dict:
 			"view_label": _render_or_error(step.get("ig_view_label") or "", ctx),
 			"image_source": step.get("ig_image_source") or "",
 		}
+	if t == SEND_NOTIFICATION:
+		return _preview_notify(step, doc)
 	return {"skipped": f"unknown step type {t}"}

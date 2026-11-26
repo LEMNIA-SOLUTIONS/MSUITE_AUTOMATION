@@ -19,7 +19,23 @@ MSuite Automation for the MSuite platform: event triggers, filters, multi-step a
 - **Variable mapping**: a chosen WhatsApp template with an unmapped variable (neither a source field nor a fallback value) blocks every save, drafts included ("Automation is not valid"). Bulk campaign steps are skipped.
 - **Activation checks (`engine/graph.py`)**: turning an automation on is blocked by empty If/Else branches and by unconnected (orphan) steps; saving a draft only warns. Field Change triggers also fire when a record is created with the matching value (no separate "also on create" option).
 - **Send-to field types**: WhatsApp, SMS and Add to List need a Phone field, Send Email needs an Email field; a blank Update Field value is rejected when the target field is mandatory.
-- **Dry run (`engine/preview.py`)**: the result carries a `trigger` check (Field Change current value, Date Based date window, Document Event by the record's docstatus, Schedule by the trigger filters; delete events show "fires when the record is deleted" with no verdict). Steps are still previewed when the trigger would not match. Skipped steps show their reason on the canvas node.
+- **Send Notification (Notify) step**:
+  - **Step type**: `Send Notification` (shown as **Notify** in the builder and `get_automations` `channels` chip).
+  - **Fields** (`Automation Step`): `notify_push` (Check, default 1), `notify_in_app` (Check, default 1), `notify_mode` (Select), `notify_role` (Link `Role`), `notify_users` (Code JSON list of user IDs), `notify_field` (Data), `notify_title` (Data, Jinja, truncated to 140 chars), `notify_body` (Small Text, Jinja), `notify_category` (Select), `notify_priority` (`high` / `normal`), `notify_route` (Data, Jinja, defaults to `/`).
+  - **Recipient modes** (the five modes):
+    - `Role`: enabled users holding `notify_role` (`Has Role`).
+    - `Specific Users`: enabled users listed in `notify_users` (JSON list).
+    - `Record Owner`: `doc.owner` (if enabled user).
+    - `Assignee`: users with `Open` `ToDo` assignments on the record (if enabled users).
+    - `Field on Record`: comma/semicolon-separated values from `notify_field` (checked on every reaching DocType). Non-User email identifiers are kept for push-only delivery; in-app bell rows still require enabled `User` accounts. Blank values and `Guest` are dropped in all modes.
+  - **Categories**: `General` (default), `Academic`, `Billing`, `Marketing`, `System`.
+  - **Skip reasons & error handling**:
+    - `no recipient`: no recipient resolved after filtering.
+    - `push unavailable`: push-only step when `msuite_notification` is not installed or `Push Notification Config` is disabled/suppressed.
+    - `duplicate`: deduplication lock already held for this run/step/record.
+    - Needs `msuite_notification` installed for push; without it, in-app bell notifications still send and push-only steps skip with `push unavailable` (never fails the run). Per-recipient push enqueue errors are logged to Error Log without failing the run or blocking remaining recipients.
+  - **Admin how-to**: Configure provider keys in **Push Notification Config** → create or edit a Messaging Automation and add a **Notify** step → test recipients, rendered text, and route with **Test** (dry run) before activating.
+- **Dry run (`engine/preview.py`)**: the result carries a `trigger` check (Field Change current value, Date Based date window, Document Event by the record's docstatus, Schedule by the trigger filters; delete events show "fires when the record is deleted" with no verdict). Steps are still previewed when the trigger would not match. Skipped steps show their reason on the canvas node. Also previews `Send Notification` steps with `channels`, `to`, `title`, `body`, and `route` (or `skipped: no recipient`) without sending or writing logs.
 - **Run log**: failed runs expose the error in `get_runs` / `last_run`; WhatsApp steps record the `Channel Message` name and `get_runs` joins its live `status` / `status_error` / `failure_reason` (sent → delivered → read, or failed + reason).
 - **Failed sends are recorded and shown (AUT-123)**: a WhatsApp send the channel rejects keeps its failed `Channel Message` name in the run log (`SendFailed` / `SendRetry` carry `channel_message`), so the reason shows in the run. A run is stored as `Failed` when any send errored (retry skips sends already made). If WhatsApp reports a message as failed after it was sent, `get_runs` shows that run as `Failed` with the linked `Channel Message` failure reason and `delivery_failed: true` (display only; the stored status is unchanged and Retry is hidden).
 - **All-skipped runs and Deal primary contact mobile (AUT-124, D7, D8, Follow-ups)**:
@@ -65,7 +81,7 @@ These endpoints return the value directly. They do not use the `{ok, data, error
 - Fields: `title` (required), `description`, `disabled`, `send_frequency` (`Every time`, `Once per day`, `Once per document`), `filter_logic`, `phone_field`, `email_field`, `whatsapp_account`, `sms_account`, `skip_return_documents`.
 - Child tables: `triggers`, `filters`, `steps`, `edges`, `variable_mappings`, `recipients`, `notes`.
 - Trigger types: `Document Event`, `Field Change`, `Date Based`, `Schedule`.
-- Step types: `Send WhatsApp`, `Send Email`, `Send SMS`, `Wait`, `Wait for Event`, `If/Else`, `Switch`, `Update Field`, `Add to Recipient List`, `Send IG Public Reply`, `Send IG Consent Template`.
+- Step types: `Send WhatsApp`, `Send Email`, `Send SMS`, `Wait`, `Wait for Event`, `If/Else`, `Switch`, `Update Field`, `Add to Recipient List`, `Send IG Public Reply`, `Send IG Consent Template`, `Send Notification`.
 - A user without permission level 1 write access cannot change a trigger `condition`. MSuite keeps the saved condition and ignores the one sent.
 
 **Mention automation.** Use a `Document Event` trigger on `Social Mention` with `doc_event` `After Insert`, and a `Send IG Public Reply` step with `ig_reply_text`. The Instagram steps need every trigger to be a `Social Mention` trigger. Turning the automation on makes MSuite reply publicly to every new mention on accounts with a live token.

@@ -304,3 +304,7 @@ NOTIFY_MODES = (
 NOTIFY_ERROR_NO_CHANNEL = "Select at least one notification channel (push or in-app)"
 NOTIFY_ERROR_EMPTY_TITLE = "Notification title cannot be empty"
 NOTIFY_ERROR_INVALID_TEMPLATE = "Invalid template in {0}: {1}"
+NOTIFY_CHANNEL_LABEL = "Notify"
+NOTIFY_PREVIEW_CHANNEL_PUSH = "push"
+NOTIFY_PREVIEW_CHANNEL_IN_APP = "in_app"
+NOTIFY_PUSH_ERROR_LOG_TITLE = "Notify step push enqueue failed"

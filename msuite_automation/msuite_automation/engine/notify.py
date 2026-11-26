@@ -23,6 +23,7 @@ from msuite_automation.msuite_automation.constants import (
 	NOTIFY_MODE_RECORD_OWNER,
 	NOTIFY_MODE_ROLE,
 	NOTIFY_MODE_SPECIFIC_USERS,
+	NOTIFY_PUSH_ERROR_LOG_TITLE,
 	NOTIFY_TITLE_MAX,
 	RESULT_SKIPPED_NO_RECIPIENT,
 	SKIP_REASON_PUSH_UNAVAILABLE,
@@ -274,7 +275,9 @@ def send_notification(ctx, step) -> StepOutcome:
 	Acquires the standard step deduplication lock via ``steps._send`` so duplicate
 	runs and retries do not double-send. Missing ``msuite_notification`` app or
 	disabled Push Notification Config does not fail the step: in-app still runs,
-	and push-only steps skip with SKIP_REASON_PUSH_UNAVAILABLE.
+	and push-only steps skip with SKIP_REASON_PUSH_UNAVAILABLE. Per-recipient push
+	enqueue exceptions are logged via ``frappe.log_error`` without failing the run
+	or stopping delivery to remaining recipients.
 
 	Args:
 		ctx: Automation execution context containing automation, doc, value, discriminator, entry.
@@ -353,21 +356,25 @@ def send_notification(ctx, step) -> StepOutcome:
 				delivered = True
 
 			if use_push and push_fn is not None:
-				log_names = push_fn(
-					recipient=recipient,
-					title=title,
-					body=body,
-					data={"screen": route, "entity_type": doctype, "entity_name": docname},
-					priority=priority,
-					category=category,
-					idempotency_key=f"{dedupe_base}:{recipient}",
-					source_doctype=doctype,
-					source_name=docname,
-					enqueue_after_commit=True,
-				)
-				if log_names:
-					push_queued = True
-					delivered = True
+				try:
+					log_names = push_fn(
+						recipient=recipient,
+						title=title,
+						body=body,
+						data={"screen": route, "entity_type": doctype, "entity_name": docname},
+						priority=priority,
+						category=category,
+						idempotency_key=f"{dedupe_base}:{recipient}",
+						source_doctype=doctype,
+						source_name=docname,
+						enqueue_after_commit=True,
+					)
+				except Exception:
+					frappe.log_error(title=NOTIFY_PUSH_ERROR_LOG_TITLE, message=frappe.get_traceback())
+				else:
+					if log_names:
+						push_queued = True
+						delivered = True
 
 		if delivered:
 			return True

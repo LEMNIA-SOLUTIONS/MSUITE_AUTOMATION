@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import frappe
 
+from msuite_automation.msuite_automation.api import automations as api
 from msuite_automation.msuite_automation.constants import (
 	NOTIFY_APP,
 	NOTIFY_DEFAULT_CATEGORY,
@@ -14,6 +15,7 @@ from msuite_automation.msuite_automation.constants import (
 	NOTIFY_MODE_RECORD_OWNER,
 	NOTIFY_MODE_ROLE,
 	NOTIFY_MODE_SPECIFIC_USERS,
+	NOTIFY_PUSH_ERROR_LOG_TITLE,
 	NOTIFY_TITLE_MAX,
 	RESULT_SENT,
 	RESULT_SKIPPED_DUPLICATE,
@@ -25,7 +27,7 @@ from msuite_automation.msuite_automation.constants import (
 	STEP_STATUS_ERROR,
 	UPDATE_FIELD,
 )
-from msuite_automation.msuite_automation.engine import channels, executor, notify, steps
+from msuite_automation.msuite_automation.engine import channels, executor, notify, preview, steps
 
 PUSH_PATH = "msuite_notification.services.queue.enqueue_push"
 IN_APP_PATH = "msuite_core.services.notifications.create_notification_log"
@@ -517,3 +519,166 @@ class TestNotifyStep(unittest.TestCase):
 		self.assertEqual(res.outcome_status, STEP_STATUS_ERROR)
 		mock_in_app.assert_not_called()
 		mock_push.assert_not_called()
+
+	@patch("frappe.log_error")
+	@patch("frappe.publish_realtime")
+	@patch(PUSH_PATH, side_effect=[RuntimeError("queue down"), ["PNL-2"]])
+	def test_push_exception_does_not_fail_step_or_stop_loop(self, mock_push, mock_realtime, mock_log_error):
+		u1 = _ensure_user("push_err_1", enabled=1)
+		u2 = _ensure_user("push_err_2", enabled=1)
+		step = _step(
+			notify_push=1,
+			notify_in_app=1,
+			notify_users=json.dumps([u1, u2]),
+			notify_title="ZZ notify push err {{ doc.name }}",
+			notify_body="Alert body",
+			notify_route="/todos/{{ doc.name }}",
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-22", description="d")
+		ctx = _ctx(step, doc, value="v-push-err")
+		self._track_lock(ctx, step)
+
+		res = steps.execute(ctx, step)
+		self.assertEqual(res, RESULT_SENT)
+		self.assertNotEqual(res.outcome_status, STEP_STATUS_ERROR)
+		self.assertEqual(mock_push.call_count, 2)
+		self.assertEqual([c.kwargs["recipient"] for c in mock_push.call_args_list], [u1, u2])
+		mock_log_error.assert_called_once()
+		self.assertEqual(mock_log_error.call_args.kwargs["title"], NOTIFY_PUSH_ERROR_LOG_TITLE)
+
+		for user in (u1, u2):
+			row = frappe.db.get_value(
+				"Notification Log",
+				{"for_user": user, "document_type": "ToDo", "document_name": "T-22"},
+				["subject", "msuite_route", "read"],
+				as_dict=True,
+			)
+			self.assertIsNotNone(row, f"Missing in-app Notification Log for {user}")
+			self.assertEqual(row.subject, "ZZ notify push err T-22")
+
+	def _preview_automation(self, step_kw: dict):
+		return frappe.get_doc(
+			{
+				"doctype": "Messaging Automation",
+				"title": AUTO_TITLE,
+				"disabled": 1,
+				"triggers": [
+					{
+						"trigger_id": "t1",
+						"trigger_type": "Document Event",
+						"reference_doctype": "ToDo",
+						"doc_event": "After Save",
+					}
+				],
+				"steps": [dict(_step(**step_kw))],
+				"edges": [{"source_id": "t1", "source_handle": "", "target_id": "n1"}],
+			}
+		)
+
+	def test_preview_lists_recipients_and_rendered_text(self):
+		u1 = _ensure_user("prev_1", enabled=1)
+		u2 = _ensure_user("prev_2", enabled=1)
+		auto = self._preview_automation(
+			{
+				"notify_push": 1,
+				"notify_in_app": 1,
+				"notify_mode": NOTIFY_MODE_SPECIFIC_USERS,
+				"notify_users": json.dumps([u1, u2]),
+				"notify_title": "ZZ notify {{ doc.name }}",
+				"notify_body": "Desc: {{ doc.description }}",
+				"notify_route": "/todo/{{ doc.name }}",
+			}
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-PREV-1", description="Check order")
+		out = preview.dry_run(auto, doc)
+		step_row = out["steps"][0]
+		self.assertNotIn("error", step_row)
+		self.assertEqual(step_row["channels"], ["push", "in_app"])
+		self.assertEqual(step_row["to"], [u1, u2])
+		self.assertEqual(step_row["title"], "ZZ notify T-PREV-1")
+		self.assertEqual(step_row["body"], "Desc: Check order")
+		self.assertEqual(step_row["route"], "/todo/T-PREV-1")
+
+	def test_preview_no_recipient_is_skipped(self):
+		auto = self._preview_automation(
+			{
+				"notify_mode": NOTIFY_MODE_SPECIFIC_USERS,
+				"notify_users": "[]",
+			}
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-PREV-2", description="d")
+		out = preview.dry_run(auto, doc)
+		self.assertEqual(out["steps"][0]["skipped"], "no recipient")
+
+	@patch("frappe.publish_realtime")
+	@patch(PUSH_PATH)
+	@patch(IN_APP_PATH)
+	def test_preview_writes_nothing(self, mock_in_app, mock_push, mock_realtime):
+		u1 = _ensure_user("prev_nowrite", enabled=1)
+		auto = self._preview_automation(
+			{
+				"notify_push": 1,
+				"notify_in_app": 1,
+				"notify_mode": NOTIFY_MODE_SPECIFIC_USERS,
+				"notify_users": json.dumps([u1]),
+				"notify_title": "ZZ notify no write {{ doc.name }}",
+			}
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-PREV-3", description="d")
+		bell_before = frappe.db.count("Notification Log")
+		has_push_log = frappe.db.exists("DocType", "Push Notification Log")
+		push_before = frappe.db.count("Push Notification Log") if has_push_log else 0
+		mock_realtime.reset_mock()
+
+		out = preview.dry_run(auto, doc)
+		self.assertEqual(out["steps"][0]["to"], [u1])
+		mock_in_app.assert_not_called()
+		mock_push.assert_not_called()
+		mock_realtime.assert_not_called()
+		self.assertEqual(frappe.db.count("Notification Log"), bell_before)
+		if has_push_log:
+			self.assertEqual(frappe.db.count("Push Notification Log"), push_before)
+
+	def test_preview_invalid_jinja_returns_readable_error(self):
+		u1 = _ensure_user("prev_bad_jinja", enabled=1)
+		auto = self._preview_automation(
+			{
+				"notify_mode": NOTIFY_MODE_SPECIFIC_USERS,
+				"notify_users": json.dumps([u1]),
+				"notify_title": "Broken {{ doc.name",
+			}
+		)
+		doc = frappe._dict(doctype="ToDo", name="T-PREV-4", description="d")
+		out = preview.dry_run(auto, doc)
+		step_row = out["steps"][0]
+		self.assertIn("error", step_row)
+		self.assertIn("template", step_row["error"].lower())
+		self.assertNotIn("Traceback", step_row["error"])
+
+	def test_get_automations_channel_chip_notify(self):
+		frappe.set_user("Administrator")
+		u1 = _ensure_user("chip_user", enabled=1)
+		name = api.save_automation(
+			{
+				"title": AUTO_TITLE,
+				"disabled": 1,
+				"triggers": [
+					{
+						"trigger_id": "t1",
+						"trigger_type": "Document Event",
+						"reference_doctype": "ToDo",
+						"doc_event": "After Save",
+					}
+				],
+				"steps": [
+					dict(_step(step_id="n1", notify_users=json.dumps([u1]))),
+					{"step_id": "s1", "step_type": "Send SMS", "sms_message": "hi"},
+				],
+				"edges": [
+					{"source_id": "t1", "source_handle": "", "target_id": "n1"},
+					{"source_id": "n1", "source_handle": "", "target_id": "s1"},
+				],
+			}
+		)["name"]
+		row = next(r for r in api.get_automations(search=AUTO_TITLE)["items"] if r["name"] == name)
+		self.assertEqual(row["channels"], ["SMS", "Notify"])

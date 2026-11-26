@@ -20,9 +20,9 @@ from msuite_automation.msuite_automation.constants import (
 from msuite_inbox.inbox.services.channels import messenger_templates
 from msuite_automation.msuite_automation.constants import (
 	DATE_BASED, DEAL_DOCTYPE, DEAL_PRIMARY_CONTACT_MOBILE, DELIVERY_FAILED_DEFAULT_ERROR, DOCTYPE, DOCUMENT_EVENT, FIELD_CHANGE, MESSAGE_STATUS_FAILED,
-	RESULT_SKIPPED_PREFIX, RUN_DOCTYPE, RUN_ERROR_MAX,
+	NOTIFY_CHANNEL_LABEL, RESULT_SKIPPED_PREFIX, RUN_DOCTYPE, RUN_ERROR_MAX,
 	RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RUN_STATUS_FAILED, RUN_STATUS_SKIPPED, SCHEDULE,
-	SEND_EMAIL, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
+	SEND_EMAIL, SEND_NOTIFICATION, SEND_SMS, SEND_WHATSAPP, SKIP_MAPPING_CHECK_FLAG,
 	STEP_OUTCOME_KEY, STEP_STATUS_SKIPPED, outcome_of, step_skipped,
 )
 from msuite_automation.msuite_automation.engine import preview
@@ -30,7 +30,7 @@ from msuite_automation.msuite_automation.engine.filters import VIRTUAL_FIELD_RES
 from msuite_core.services.permissions.checks import check_delete, check_read, check_write
 
 CHILD_TABLES = ("triggers", "filters", "steps", "variable_mappings", "edges", "recipients", "notes")
-CHANNEL_LABEL = {SEND_WHATSAPP: "WA", SEND_EMAIL: "Email", SEND_SMS: "SMS"}
+CHANNEL_LABEL = {SEND_WHATSAPP: "WA", SEND_EMAIL: "Email", SEND_SMS: "SMS", SEND_NOTIFICATION: NOTIFY_CHANNEL_LABEL}
 NO_VALUE_TYPES = frappe.model.no_value_fields + frappe.model.table_fields
 STANDARD_DOC_FIELDS = {"name", "owner", "creation", "modified", "modified_by", "docstatus", "doctype"}
 SKIP_FIELDS = STANDARD_DOC_FIELDS | {"idx", *CHILD_TABLES}
@@ -127,7 +127,7 @@ def get_automations(search: str = "", trigger_type: str = "", enabled: str = "",
 			"trigger_types": sorted({t.trigger_type for t in triggers if t.trigger_type}),
 			"doctypes": sorted({t.reference_doctype for t in triggers if t.reference_doctype}),
 			"when_summary": when_summary({"triggers": triggers}),
-			"channels": [c for c in ("WA", "Email", "SMS") if c in chans.get(r.name, ())],
+			"channels": [c for c in CHANNEL_LABEL.values() if c in chans.get(r.name, ())],
 			"last_run": last.get(r.name),
 			"modified": str(r.modified),
 		})
